@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 0.3: sample-free FM kick with +/-24 semitone tuning.
+ * EXTRATONE CORE 0.4: resonant, saturated four-pole low-pass and clean sub.
  * No samples, no floating point, no allocation, no 64-bit division.
  */
 #ifndef EXTRATONE_KICK_H
@@ -27,6 +27,14 @@ typedef struct {
     uint32_t click_amount;   /* 0..127, synthetic noise transient */
     uint32_t sub_body;       /* 0..127, parallel un-distorted sub oscillator */
     uint32_t fm_decay_coef;  /* precomputed envelope coefficient */
+    uint32_t filter_cutoff;  /* 0..127 logarithmic frequency 30..12000 Hz */
+    uint32_t filter_res;     /* 0..127 feedback amount */
+    uint32_t filter_env_amt; /* 0..127 peak cutoff modulation */
+    uint32_t filter_env_ms;  /* 5..1500 ms */
+    uint32_t filter_bypass;  /* 0 = LP24 enabled, 1 = compare without it */
+    uint32_t filter_span;    /* cached envelope span in LUT indices */
+    uint32_t filter_res_q12; /* cached nonlinear feedback gain */
+    uint32_t filter_env_coef;/* cached decay, Q16 */
 } ext_settings_t;
 
 typedef struct {
@@ -35,6 +43,8 @@ typedef struct {
     uint32_t retrigger_clock_q16;
     uint32_t triggers;
     uint32_t fm_env_q15, click_env_q15, sub_phase, noise_state;
+    int32_t lp24[4];          /* four one-pole states; zero latency, no audio buffers */
+    uint32_t filter_env_q15, filter_coeff_q15, filter_frames;
 } ext_kick_t;
 
 static int32_t ext_sine(uint32_t phase)
@@ -74,6 +84,66 @@ static uint32_t ext_transpose_hz(uint32_t base_hz, int32_t semitones)
     return hz;
 }
 
+/* 128 logarithmically spaced cutoffs, 30..12000 Hz at 44.1 kHz.
+ * Values are 1-exp(-2*pi*f/fs) in Q15, computed offline.
+ * Updating only once per 16 frames avoids float/division in audio ISR.
+ */
+static const uint16_t EXT_LP24_COEFF_Q15[128] = {
+    140u, 146u, 154u, 161u, 169u, 177u, 185u, 194u,
+    204u, 213u, 224u, 234u, 246u, 258u, 270u, 283u,
+    297u, 311u, 326u, 341u, 358u, 375u, 393u, 412u,
+    432u, 452u, 474u, 497u, 521u, 546u, 572u, 599u,
+    628u, 658u, 689u, 722u, 757u, 793u, 830u, 870u,
+    911u, 955u, 1000u, 1048u, 1098u, 1150u, 1204u, 1261u,
+    1321u, 1383u, 1449u, 1517u, 1588u, 1663u, 1741u, 1823u,
+    1909u, 1998u, 2091u, 2189u, 2291u, 2397u, 2509u, 2625u,
+    2746u, 2873u, 3005u, 3143u, 3287u, 3437u, 3594u, 3757u,
+    3927u, 4104u, 4289u, 4481u, 4682u, 4890u, 5107u, 5332u,
+    5567u, 5810u, 6063u, 6326u, 6599u, 6881u, 7174u, 7478u,
+    7793u, 8118u, 8455u, 8803u, 9162u, 9533u, 9916u, 10310u,
+    10717u, 11134u, 11564u, 12005u, 12458u, 12922u, 13397u, 13882u,
+    14379u, 14885u, 15400u, 15925u, 16458u, 16998u, 17546u, 18099u,
+    18658u, 19220u, 19786u, 20354u, 20923u, 21491u, 22057u, 22621u,
+    23179u, 23732u, 24277u, 24813u, 25339u, 25853u, 26354u, 26840u
+};
+
+static int32_t ext_filter_softclip(int32_t x)
+{
+    /* Nonlinear feedback saturation. Bounded for any resonance setting. */
+    if (x > 60000) x = 60000;
+    if (x < -60000) x = -60000;
+    if (x > 16000) return 16000 + (x - 16000) / 4;
+    if (x < -16000) return -16000 + (x + 16000) / 4;
+    return x;
+}
+
+/* A resonant cascade of four one-pole low-passes (24 dB/oct asymptotically).
+ * This is NOT an analog ladder circuit emulation. Saturation is within the
+ * feedback path; a fixed-point bound makes high resonance safe.
+ */
+static int32_t ext_filter_lp24(ext_kick_t *s, const ext_settings_t *p, int32_t x)
+{
+    int32_t in, feedback;
+    uint32_t i, g;
+    if (p->filter_bypass) return x;
+    if (!(s->filter_frames++ & 15u)) {
+        uint32_t index = p->filter_cutoff
+                       + ((p->filter_span * s->filter_env_q15) >> 15);
+        if (index > 127u) index = 127u;
+        s->filter_coeff_q15 = EXT_LP24_COEFF_Q15[index];
+    }
+    g = s->filter_coeff_q15;
+    feedback = (s->lp24[3] * (int32_t)p->filter_res_q12) >> 12;
+    /* More resonance = more input drive into the nonlinear feedback loop. */
+    in = ext_filter_softclip(((x - feedback) * (int32_t)(256u + p->filter_res)) >> 8);
+    for (i = 0u; i < 4u; ++i) {
+        int32_t delta = in - s->lp24[i];
+        s->lp24[i] += (int32_t)((delta * (int32_t)g) >> 15);
+        in = s->lp24[i];
+    }
+    return s->lp24[3];
+}
+
 /* Recalculate whenever parameters change in the main/UI loop. */
 static void ext_recalc(ext_settings_t *p)
 {
@@ -87,6 +157,13 @@ static void ext_recalc(ext_settings_t *p)
     if (p->decay_coef > 32767u) p->decay_coef = 32767u;
     p->fm_decay_coef = 10268u / (p->fm_decay_ms ? p->fm_decay_ms : 1u);
     if (p->fm_decay_coef > 32767u) p->fm_decay_coef = 32767u;
+    if (p->filter_cutoff > 127u) p->filter_cutoff = 127u;
+    if (p->filter_res > 127u) p->filter_res = 127u;
+    if (p->filter_env_amt > 127u) p->filter_env_amt = 127u;
+    p->filter_span = ((127u - p->filter_cutoff) * p->filter_env_amt + 63u) / 127u;
+    p->filter_res_q12 = p->filter_res * 132u;  /* 0..4.09x feedback */
+    p->filter_env_coef = 10268u / (p->filter_env_ms ? p->filter_env_ms : 1u);
+    if (p->filter_env_coef > 32767u) p->filter_env_coef = 32767u;
 }
 
 static void ext_trigger(ext_kick_t *s, const ext_settings_t *p)
@@ -97,6 +174,8 @@ static void ext_trigger(ext_kick_t *s, const ext_settings_t *p)
     s->amplitude_q15 = 30000;
     s->fm_env_q15 = 32767u;
     s->click_env_q15 = 32767u;
+    s->filter_env_q15 = 32767u;
+    s->filter_frames = 0u;
     s->triggers++;
     s->noise_state ^= (s->triggers * 2654435761u);
     if (!s->noise_state) s->noise_state = 1u;
@@ -116,7 +195,9 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
     } else {
         s->retrigger_clock_q16 = 0;
     }
-    if (!s->amplitude_q15) return 0;
+    if (!s->amplitude_q15 && s->click_env_q15 == 0u
+        && s->lp24[0] == 0 && s->lp24[1] == 0
+        && s->lp24[2] == 0 && s->lp24[3] == 0) return 0;
 
     /* Sweeps reach ~99% of target difference in sweep_ms. */
     target = p->tuned_end_hz << 8;
@@ -149,6 +230,9 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
     if (sample > 30000) sample = 30000;
     if (sample < -30000) sample = -30000;
 
+    /* The aggressive carrier goes through LP24. Clean SUB is mixed AFTER it. */
+    sample = ext_filter_lp24(s, p, sample);
+
     /* A separate clean sub at tuned END Hz survives strong main-path drive.
        Free-running phase prevents full phase restarts on every retrigger. */
     s->sub_phase += (p->tuned_end_hz << 8) * 380u;
@@ -171,6 +255,10 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
 
     if (sample > 30000) sample = 30000;
     if (sample < -30000) sample = -30000;
+
+    fall = (s->filter_env_q15 * p->filter_env_coef) >> 16;
+    if (!fall && s->filter_env_q15) fall = 1u;
+    s->filter_env_q15 = s->filter_env_q15 > fall ? s->filter_env_q15 - fall : 0u;
 
     fall = (s->fm_env_q15 * p->fm_decay_coef) >> 16;
     if (!fall && s->fm_env_q15) fall = 1u;
