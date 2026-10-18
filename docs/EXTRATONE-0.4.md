@@ -1,4 +1,4 @@
-# EXTRATONE CORE 0.4 — LP24 filter prototype
+# EXTRATONE CORE 0.4.1 — fixed LP24 routing
 
 This is an experimental firmware build for the **FM-1 emulator first**. It has not
 been measured or verified on a physical FM-1. The original Dinghy `main` branch
@@ -12,8 +12,12 @@ and EXTRATONE 0.3 remain unchanged.
   curve must be evaluated by ear and against CPU timing on the device.
 - 128 logarithmically spaced cutoff positions from approximately **30–12,000 Hz**.
 - A falling cutoff envelope triggered by each kick.
-- **Clean SUB oscillator** mixed *after* the distorted/filter path; the click
-  transient also bypasses the LP24 in this prototype.
+- **FULL SERIAL (default):** FM body, clean sub and transient are mixed **before**
+  the LP24, so cutoff/resonance affect the **whole kick**. This fixes the v0.4
+  problem where most of the audible bass/click bypassed the filter.
+- **SUB SAFE (optional):** sub bypasses the LP24, while FM body and click are
+  filtered. Useful for extreme filter settings but inherently less dramatic.
+- No additional parallel unfiltered path remains in FULL SERIAL mode.
 - No lookahead, no convolution, no multiband processing or audio-buffer delay.
 - Filter calculations are all integer / fixed-point, coefficients refresh every
   16 frames. No float or 64-bit division in the audio interrupt.
@@ -28,11 +32,13 @@ and EXTRATONE 0.3 remain unchanged.
 | TIMBRE | EDIT | FM RATIO | FM DECAY | CLICK | SUB |
 | **LP24** | **FX** | **CUTOFF (Hz)** | **RESONANCE** | **ENV AMT** | **ENV TIME** |
 
-- **FX** toggles the LP24 page; **GLO** enables/bypasses the LP24 regardless of page.
+- **FX** opens/closes the LP24 page; **GLO** enables/bypasses the LP24 regardless of page.
+- **SEL** toggles **FULL SERIAL** (default) vs **SUB SAFE** routing.
 - **PLAY** switches rolling retrigger on/off.
-- The LP24 screen displays `LP24 ON SUB SAFE` or `LP24 BYPASS`.
+- The LP24 screen displays `LP24 FULL SERIAL`, `LP24 SUB SAFE`, or `LP24 BYPASS`.
 - USB-MIDI CCs (channel 1): cutoff **33**, resonance **34**, envelope amount **35**,
-  envelope time **36**, bypass **37** (0 = enabled, 127 = bypass).
+  envelope time **36**, bypass **37** (0 = enabled, 127 = bypass), routing
+  **38** (0 = FULL SERIAL, 127 = SUB SAFE).
 
 ## Audible A/B test in the emulator
 
