@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 1.0: independent mixer, musical synthesized transient engine.
+ * EXTRATONE CORE 1.1: musical keyboard-rate extratone, phase reset and attack verification.
  * No samples, no floating point, no allocation, no 64-bit division.
  */
 #ifndef EXTRATONE_KICK_H
@@ -16,7 +16,11 @@ typedef struct {
     uint32_t fm_depth;    /* 0..127, FM phase index: 0 to approx 4 cycles */
     uint32_t drive;       /* 0..127, up to ~22x nonlinear pre-gain */
     uint32_t roll_on;     /* PLAY starts/stops independent retriggering */
-    uint32_t period_q16;  /* precomputed, no divisions in audio ISR */
+    uint32_t period_q16;  /* legacy cached roll period, no ISR division */
+    uint32_t roll_step;   /* phase accumulator increment, sub-Hz resolution */
+    uint32_t key_rate_q8;/* keyboard note frequency, Hz in Q8 */
+    uint32_t key_roll_on; /* keyboard held-note roll active */
+    uint32_t key_rate_mode;/* OCT- toggles musical-rate keyboard mode */
     uint32_t sweep_coef;  /* precomputed exponential envelope */
     uint32_t decay_coef;  /* precomputed amplitude envelope */
     int32_t tune_semitones; /* -24..+24: whole kick frequency transposition */
@@ -65,7 +69,7 @@ typedef struct {
 typedef struct {
     uint32_t carrier_phase, mod_phase; /* OSC A/B phase accumulators */
     uint32_t pitch_q8, amplitude_q15;
-    uint32_t retrigger_clock_q16;
+    uint32_t retrigger_clock_q16; /* roll phase accumulator, wraps at one cycle */
     uint32_t triggers;
     uint32_t fm_env_q15, click_env_q15, sub_phase, noise_state;
     uint32_t transient_phase;
@@ -274,9 +278,45 @@ static int32_t ext_filter_lp24(ext_kick_t *s, const ext_settings_t *p, int32_t x
 }
 
 /* Recalculate whenever parameters change in the main/UI loop. */
+/* MIDI note frequencies in Hz*256 (equal temperament, A4=440Hz).
+ * Constant table: no floating point / powf / division in audio ISR.
+ * MIDI 57 A3 = 220Hz, 69 A4 = 440Hz, 81 A5 = 880Hz.
+ */
+static const uint32_t EXT_MIDI_HZ_Q8[128] = {
+    2093u, 2217u, 2349u, 2489u, 2637u, 2794u, 2960u, 3136u,
+    3322u, 3520u, 3729u, 3951u, 4186u, 4435u, 4699u, 4978u,
+    5274u, 5588u, 5920u, 6272u, 6645u, 7040u, 7459u, 7902u,
+    8372u, 8870u, 9397u, 9956u, 10548u, 11175u, 11840u, 12544u,
+    13290u, 14080u, 14917u, 15804u, 16744u, 17740u, 18795u, 19912u,
+    21096u, 22351u, 23680u, 25088u, 26580u, 28160u, 29834u, 31609u,
+    33488u, 35479u, 37589u, 39824u, 42192u, 44701u, 47359u, 50175u,
+    53159u, 56320u, 59669u, 63217u, 66976u, 70959u, 75178u, 79649u,
+    84385u, 89402u, 94719u, 100351u, 106318u, 112640u, 119338u, 126434u,
+    133952u, 141918u, 150356u, 159297u, 168769u, 178805u, 189437u, 200702u,
+    212636u, 225280u, 238676u, 252868u, 267905u, 283835u, 300713u, 318594u,
+    337539u, 357610u, 378874u, 401403u, 425272u, 450560u, 477352u, 505737u,
+    535809u, 567670u, 601425u, 637188u, 675077u, 715219u, 757749u, 802807u,
+    850544u, 901120u, 954703u, 1011473u, 1071618u, 1135340u, 1202851u, 1274376u,
+    1350154u, 1430439u, 1515497u, 1605613u, 1701088u, 1802240u, 1909407u, 2022946u,
+    2143237u, 2270680u, 2405702u, 2548752u, 2700309u, 2860878u, 3030994u, 3211227u
+};
+static uint32_t ext_note_hz_q8(uint32_t midi_note)
+{
+    return EXT_MIDI_HZ_Q8[midi_note > 127u ? 127u : midi_note];
+}
+/* 2^32 / 44100 = 97391.547...; Q8 remainder uses /256 approx.
+ * Integer multiply/add only; exact A3/A4 are accurate to <0.01%.
+ */
+static uint32_t ext_phase_step_q8(uint32_t hz_q8)
+{
+    return (hz_q8 >> 8) * 97392u + ((hz_q8 & 255u) * 380u);
+}
+
 static void ext_recalc(ext_settings_t *p)
 {
-    uint32_t r = p->rate_hz > 150u ? 150u : p->rate_hz;
+    uint32_t r = p->rate_hz > 1000u ? 1000u : p->rate_hz;
+    uint32_t roll_rate_q8 = p->key_roll_on ? p->key_rate_q8 : (r << 8);
+    p->roll_step = ext_phase_step_q8(roll_rate_q8);
     p->period_q16 = r ? (EXT_FS << 16) / r : 0u;
     p->sweep_coef = 6818u / (p->sweep_ms ? p->sweep_ms : 1u);
     if (p->sweep_coef > 2272u) p->sweep_coef = 2272u;
@@ -332,7 +372,7 @@ static void ext_recalc(ext_settings_t *p)
         uint32_t factor_x2 = p->b_mode == 0u ? 2u : p->fm_ratio_x2;
          p->b_ratio_q8 = (detune_ratio * factor_x2 + 256u) >> 9;
         if (!p->b_ratio_q8) p->b_ratio_q8 = 1u;
-        p->b_step_limit = (14000u * 256u * 380u / p->b_ratio_q8) * 256u;
+        p->b_step_limit = (14000u * 97392u / p->b_ratio_q8) * 256u;
      }
 }
 
@@ -340,6 +380,8 @@ static void ext_trigger(ext_kick_t *s, const ext_settings_t *p)
 {
     s->carrier_phase = 0;
     s->mod_phase = 0;
+    /* Reset SUB with A/B: no random phase relationship on each kick. */
+    s->sub_phase = 0u;
     s->pitch_q8 = p->tuned_start_hz << 8;
     s->amp_hold_left = p->amp_hold_frames;
     s->amp_stage = p->amp_attack_ms ? 1u
@@ -406,14 +448,13 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
     int32_t a_signal, b_signal, pre_mix, sample_body;
     uint32_t mod_phase_fb, carrier_phase_fm, b_step;
     uint32_t depth, noise;
-    if (p->roll_on && p->period_q16) {
-        s->retrigger_clock_q16 += 65536u;
-        if (s->retrigger_clock_q16 >= p->period_q16) {
-            s->retrigger_clock_q16 -= p->period_q16;
+    if ((p->roll_on || p->key_roll_on) && p->roll_step) {
+        uint32_t old_phase = s->retrigger_clock_q16;
+        s->retrigger_clock_q16 += p->roll_step;
+        if (s->retrigger_clock_q16 < old_phase)
             ext_trigger(s, p);
-        }
     } else {
-        s->retrigger_clock_q16 = 0;
+        s->retrigger_clock_q16 = 0u;
     }
     ext_amp_tick(s, p);
     if (!s->amplitude_q15 && s->click_env_q15 == 0u
@@ -441,15 +482,16 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
     }
 
     /* Approximation of 2^32 / (44100 * 256). */
-    step = s->pitch_q8 * 380u;
+    step = ext_phase_step_q8(s->pitch_q8);
     s->carrier_phase += step;
     /* The phase naturally wraps at 2^32; fractional ratios in 0.5 steps. */
     /* Both oscillators follow the same evolving pitch envelope;
        OSC B has its own +/-100-cent detune. Ratio only affects FM modes.
        B increment caps at 14kHz; no division inside the ISR. */
     b_step = step > p->b_step_limit
-           ? (14000u * 256u * 380u)
-           : (step >> 8) * p->b_ratio_q8;
+           ? ext_phase_step_q8(14000u << 8)
+           : (step >> 8) * p->b_ratio_q8
+             + ((step & 255u) * p->b_ratio_q8 >> 8);
     s->mod_phase += b_step;
 
     if (p->b_mode != 0u) {
@@ -486,7 +528,7 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
     if (sample_body > 30000) sample_body = 30000;
     if (sample_body < -30000) sample_body = -30000;
 
-    s->sub_phase += (p->tuned_end_hz << 8) * 380u;
+    s->sub_phase += ext_phase_step_q8(p->tuned_end_hz << 8);
     sub = (ext_sine(s->sub_phase) * (int32_t)s->amplitude_q15) >> 15;
     main_signal = sample_body;
     sub = (sub * (int32_t)p->sub_body) >> 8;
