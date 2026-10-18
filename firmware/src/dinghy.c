@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 1.0 for M-VAVE FM-1.
+ * EXTRATONE CORE 1.1 for M-VAVE FM-1.
  * All kick sound is synthesized in real-time: no samples.
  * The original Dinghy platform remains unchanged.
  */
@@ -16,6 +16,8 @@ static ext_kick_t kick;
 static ext_settings_t p;
 static uint32_t active_preset;
 static uint32_t preset_edited;
+static uint32_t current_key_note = 69u;
+static uint32_t midi_key_held, midi_key_note;
 static void app_audio(int32_t *out, uint32_t n) { ext_audio(&kick, &p, out, n); }
 
 static uint32_t bounded_add(uint32_t v, int32_t delta, uint32_t min, uint32_t max)
@@ -30,13 +32,57 @@ static void load_preset(uint32_t ix)
 {
     if (ix >= EXT_PRESET_COUNT) ix = EXT_PRESET_COUNT - 1u;
     active_preset = ix;
-    p = EXT_PRESETS[ix].settings;
+    {
+        uint32_t kept_key_mode = p.key_rate_mode;
+        p = EXT_PRESETS[ix].settings;
+        p.key_rate_mode = kept_key_mode;
+    }
+    p.key_roll_on = 0u;
+    p.key_rate_q8 = 0u;
+    midi_key_held = 0u;
     p.roll_on = 0u; /* preset switching stops automatic retrigger */
     preset_edited = 0u;
     ext_recalc(&p);
     kick = (ext_kick_t){0}; /* no old envelope/filter state leaks into new preset */
 }
 
+/* A musical note sets the *retrigger frequency* of the whole kick.
+ * A3 (MIDI 57) = 220Hz, A4 (69) = 440Hz. Main RATE knob stays manual.
+ */
+static void start_key_rate(uint32_t note)
+{
+    current_key_note = note > 127u ? 127u : note;
+    p.key_rate_q8 = ext_note_hz_q8(current_key_note);
+    p.key_roll_on = 1u;
+    ext_recalc(&p);
+    kick.retrigger_clock_q16 = 0u;
+    ext_trigger(&kick, &p);
+}
+static void stop_key_rate(void)
+{
+    p.key_roll_on = 0u;
+    p.key_rate_q8 = 0u;
+    ext_recalc(&p);
+}
+static const char *const KEY_NOTE_NAMES[12] = {
+    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
+};
+static void show_note_rate(void)
+{
+    char buf[36];
+    uint32_t i=0u, v, digits=0u;
+    char rev[12];
+    const char *note = KEY_NOTE_NAMES[current_key_note % 12u];
+    buf[i++]='K';buf[i++]='E';buf[i++]='Y';buf[i++]=' ';
+    while (*note && i<20u) buf[i++]=*note++;
+    buf[i++]=(char)('0'+ (current_key_note/12u)-1u);
+    buf[i++]=' ';
+    v=(p.key_rate_q8+128u)>>8;
+    do {rev[digits++]=(char)('0'+v%10u);v/=10u;} while(v&&digits<10u);
+    while(digits)buf[i++]=rev[--digits];
+    buf[i++]=' ';buf[i++]='H';buf[i++]='z';buf[i]=0;
+    draw_text_box(8, 92, 224, &FONT_S, buf, C_WHITE, 0);
+}
 /* MIDI CCs, channel 1, for Faderfox EC4 and Ableton. */
 static int set_cc(uint32_t cc, uint32_t val)
 {
@@ -44,7 +90,7 @@ static int set_cc(uint32_t cc, uint32_t val)
         load_preset(val * (EXT_PRESET_COUNT - 1u) / 127u);
         return 1;
     }
-    if (cc == 20u) p.rate_hz = val * 150u / 127u;
+    if (cc == 20u) p.rate_hz = val <= 64u ? val * 150u / 64u : 150u + (val - 64u) * 850u / 63u;
     else if (cc == 21u) p.start_hz = 80u + val * 5920u / 127u;
     else if (cc == 22u) p.end_hz = 20u + val * 240u / 127u;
     else if (cc == 23u) p.sweep_ms = 3u + val * 347u / 127u;
@@ -78,6 +124,10 @@ static int set_cc(uint32_t cc, uint32_t val)
     else if (cc == 53u) p.transient_ms = 1u + val * 39u / 127u;
     else if (cc == 54u) p.transient_color = val;
     else if (cc == 55u) p.transient_route = val >= 64u;
+    else if (cc == 56u) {
+        p.key_rate_mode = val >= 64u;
+        if (!p.key_rate_mode) stop_key_rate();
+    }
     else return 0;
     ext_recalc(&p);
     preset_edited = 1u;
@@ -165,10 +215,16 @@ static void show_panel(uint32_t page)
                       : page == 5u ? "A/B/SUB MIXER"
                       : page == 6u ? "AMP AHDR ENVELOPE"
                                    : "TRANSIENT ENGINE";
+    /* Clear changing label rows so shorter text never leaves ghost
+     * characters from a previous page, parameter, or preset.
+     */
+    lcd_fill(0, 45, 240, 175, C_BLACK);
     show_preset();
     draw_text_box(0, 63, 240, &FONT_S, label, C_ACC, 1);
     if (page == 0u) {
-        show_value(92, "RATE", p.rate_hz, "HZ");
+        if (p.key_rate_mode && p.key_roll_on)
+            show_note_rate();
+        else show_value(92, "ROLL RATE", p.rate_hz, "HZ");
         show_tune();
         show_value(144, "HIT", p.click_amount, "");
         show_value(170, "DRIVE", p.drive, "");
@@ -198,7 +254,7 @@ static void show_panel(uint32_t page)
         show_value(144, "SUB LEVEL", p.sub_body, "");
         show_value(170, "OUT TRIM", p.output_trim, "");
     } else if (page == 6u) {
-        show_value(92, "A ATTACK", p.amp_attack_ms, "MS");
+        show_value(92, "BODY ATTACK", p.amp_attack_ms, "MS");
         show_value(118, "D DECAY", p.decay_ms, "MS");
         show_value(144, "H HOLD", p.amp_hold_ms, "MS");
         show_value(170, "R RELEASE", p.amp_release_ms, "MS");
@@ -212,10 +268,12 @@ static void show_panel(uint32_t page)
     draw_text_box(0, 198, 240, &FONT_S,
                   page == 3u ? (p.filter_bypass ? "LP24 BYPASS" : p.filter_route ? "LP24 SUB SAFE" : "LP24 FULL SERIAL")
                              : page == 1u ? "CURVE 0=EXP 127=LIN"
-                             : page == 6u ? "AHDR: ALWAYS ONE SHOT"
+                             : page == 6u ? "BODY ADSR; HIT SEPARATE"
                              : page == 4u ? "SHAPE A / SHAPE B"
                              : page == 5u ? "MIX: INDEPENDENT GAIN"
-                             : page == 7u ? "COLOR 0=TONE 127=NOISE"
+                             : page == 7u ? "HIT=SINGLE  ROLL=REPEAT"
+                             : page == 0u ? (p.key_rate_mode ? "OCT-:KEY RATE ON" : "OCT-:KEY RATE OFF")
+                             : page == 2u && p.b_mode == 0u ? "FM OFF: LAYER"
                              : b_mode_name(p.b_mode),
                   (page == 3u && p.filter_bypass) ? C_MUT : C_ACC, 1);
     if (page == 4u) {
@@ -239,8 +297,8 @@ static void app_main(void)
     load_preset(0u);
     lcd_fill(0, 0, 240, 240, C_BLACK);
     draw_text_box(0, 13, 240, &FONT_L, "EXTRATONE", C_ACC, 1);
-    draw_text_box(0, 47, 240, &FONT_S, "EXTRATONE 1.0", C_MUT, 1);
-    draw_text_box(0, 222, 240, &FONT_S, "OCT+:HIT  ARP:AHDR", C_MUT, 1);
+    draw_text_box(0, 47, 240, &FONT_S, "EXTRATONE 1.1", C_MUT, 1);
+    draw_text_box(0, 222, 240, &FONT_S, "OCT-:KEYRATE OCT+:HIT", C_MUT, 1);
     show_panel(page);
     for (;;) {
         uint32_t keys, down, up, b, released;
@@ -252,10 +310,30 @@ static void app_main(void)
         prev_keys = keys;
         for (k = 0; k < 27u; ++k) {
             if ((down >> k) & 1u) {
-                ext_trigger(&kick, &p);
+                if (p.key_rate_mode) {
+                    start_key_rate(KEY0 + k);
+                    dirty = 1u;
+                } else ext_trigger(&kick, &p);
                 midi_send(0x90, KEY0 + k, 100);
             }
             if ((up >> k) & 1u) midi_send(0x80, KEY0 + k, 0);
+        }
+        if (p.key_rate_mode && up && !down) {
+            uint32_t current_bit = current_key_note >= KEY0
+                       && current_key_note < KEY0 + 27u
+                       ? 1u << (current_key_note-KEY0) : 0u;
+            if (current_bit && (up & current_bit)) {
+                if (keys) {
+                    for (k = 0; k < 27u; ++k)
+                        if (keys & (1u << k)) {
+                            start_key_rate(KEY0+k);
+                            break;
+                        }
+                } else if (midi_key_held) {
+                    start_key_rate(midi_key_note);
+                } else stop_key_rate();
+                dirty = 1u;
+            }
         }
         /* Note-off deliberately does not truncate a drum one-shot. */
         if (keys != prev_leds) {
@@ -272,6 +350,12 @@ static void app_main(void)
         if (b & (1u << BTN_SEQ)) { page = page == 5u ? 0u : 5u; dirty = 1; }
         if (b & (1u << BTN_ARP)) { page = page == 6u ? 0u : 6u; dirty = 1; }
         if (b & (1u << BTN_OCT_UP)) { page = page == 7u ? 0u : 7u; dirty = 1; }
+        if (b & (1u << BTN_OCT_DOWN)) {
+            p.key_rate_mode ^= 1u;
+            if (!p.key_rate_mode) stop_key_rate();
+            page = 0u;
+            dirty = 1u;
+        }
         if (b & (1u << BTN_HOME)) { page = 0u; dirty = 1; }
         if (b & (1u << BTN_REC)) {
             p.roll_on = 0u;
@@ -293,6 +377,7 @@ static void app_main(void)
         fm1_led_key(BTN_SEQ, page == 5u);
         fm1_led_key(BTN_ARP, page == 6u);
         fm1_led_key(BTN_OCT_UP, page == 7u);
+        fm1_led_key(BTN_OCT_DOWN, p.key_rate_mode != 0u);
         fm1_led_key(BTN_GLO, p.filter_bypass == 0u);
         fm1_led_key(BTN_SEL, p.filter_route != 0u);
         fm1_led_key(BTN_PLAY, p.roll_on != 0u);
@@ -309,7 +394,8 @@ static void app_main(void)
         for (k = 0; k < 4u; ++k) d[k] = fm1_enc_take(ENC_KNOB1 + k);
         if (d[0] || d[1] || d[2] || d[3]) {
             if (page == 0u) {
-                p.rate_hz = bounded_add(p.rate_hz, d[0], 0u, 150u);
+                p.rate_hz = bounded_add(p.rate_hz,
+                    d[0] * (p.rate_hz >= 150u ? 10 : 1), 0u, 1000u);
                 p.tune_semitones = (int32_t)bounded_add((uint32_t)(p.tune_semitones + 24),
                                                         d[1], 0u, 48u) - 24;
                 p.click_amount = bounded_add(p.click_amount, d[2] * 2, 0u, 127u);
@@ -358,7 +444,26 @@ static void app_main(void)
         }
 
         while (midi_get(&st, &d1, &d2)) {
-            if ((st & 0xF0u) == 0x90u && d2) ext_trigger(&kick, &p);
+            if ((st & 0xF0u) == 0x90u && d2) {
+                if (p.key_rate_mode) {
+                    midi_key_held = 1u;
+                    midi_key_note = d1;
+                    start_key_rate(d1);
+                    dirty = 1u;
+                } else ext_trigger(&kick, &p);
+            } else if (((st & 0xF0u) == 0x80u ||
+                        ((st & 0xF0u) == 0x90u && !d2)) &&
+                       p.key_rate_mode && midi_key_held && d1 == midi_key_note) {
+                midi_key_held = 0u;
+                if (keys) {
+                    for (k=0u;k<27u;++k)
+                        if (keys & (1u << k)) {
+                            start_key_rate(KEY0+k);
+                            break;
+                        }
+                } else stop_key_rate();
+                dirty = 1u;
+            }
             /* Ignore note-offs in ONE SHOT mode. CC52 = explicit CUT. */
             else if ((st & 0xF0u) == 0xB0u && (st & 15u) == 0u &&
                      d1 == 52u && d2 >= 64u) {
