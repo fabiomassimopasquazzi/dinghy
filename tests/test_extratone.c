@@ -48,51 +48,57 @@ static uint64_t shape_difference(uint32_t a, uint32_t b)
     }
     return total;
 }
-static uint64_t wave_energy(ext_settings_t p, uint32_t shape_a, uint32_t mix,
-                            uint32_t index, uint32_t feedback)
+static void configure_voice(ext_settings_t *p)
 {
-    ext_kick_t k = {0};
-    uint64_t acc = 0u;
-    uint32_t i;
-    p.rate_hz = 0u; p.roll_on = 0u;
-    p.start_hz = 180u; p.end_hz = 180u;
-    p.tune_semitones = 0; p.decay_ms = 700u;
-    p.drive = 0u; p.click_amount = 0u; p.sub_body = 0u;
-    p.filter_bypass = 1u;
-    p.shape_a = shape_a; p.shape_b = 108u;
-    p.osc_mix = mix; p.fm_depth = index;
-    p.fm_feedback = feedback; p.fm_ratio_x2 = 6u;
-    ext_recalc(&p); ext_trigger(&k, &p);
-    for (i = 0u; i < 4000u; ++i) {
-        int32_t y = ext_tick(&k, &p);
-        if (y < -30000 || y > 30000) return 0u;
-        acc += (uint32_t)(y < 0 ? -y : y);
-    }
-    return acc;
+    p->rate_hz = 0u;
+    p->roll_on = 0u;
+    p->start_hz = 150u;
+    p->end_hz = 150u;
+    p->tune_semitones = 0;
+    p->decay_ms = 900u;
+    p->drive = 0u;
+    p->click_amount = 0u;
+    p->sub_body = 0u;
+    p->filter_bypass = 1u;
+    p->output_trim = 127u;
+    p->shape_a = 0u;
+    p->shape_b = 110u;
+    p->level_a = 127u;
+    p->level_b = 127u;
+    p->fm_ratio_x2 = 6u;
+    p->fm_depth = 82u;
+    p->fm_feedback = 56u;
+    p->b_detune_cents = 0;
 }
-static uint64_t wave_difference(ext_settings_t p, uint32_t mix_a, uint32_t mix_b,
-                                 uint32_t index_a, uint32_t index_b,
-                                 uint32_t fb_a, uint32_t fb_b)
+/* Compare actual output samples for different routing/controls. */
+static uint64_t rendered_difference(ext_settings_t p, ext_settings_t q)
 {
     ext_kick_t a = {0}, b = {0};
     uint64_t total = 0u;
     uint32_t i;
-    p.rate_hz = 0u; p.roll_on = 0u;
-    p.start_hz = 160u; p.end_hz = 160u;
-    p.decay_ms = 900u; p.tune_semitones = 0;
-    p.drive = 0u; p.sub_body = 0u; p.click_amount = 0u;
-    p.filter_bypass = 1u;
-    p.shape_a = 0u; p.shape_b = 108u;
-    p.fm_ratio_x2 = 6u;
     ext_recalc(&p);
-    ext_settings_t q = p;
-    p.osc_mix = mix_a; p.fm_depth = index_a; p.fm_feedback = fb_a;
-    q.osc_mix = mix_b; q.fm_depth = index_b; q.fm_feedback = fb_b;
+    ext_recalc(&q);
     ext_trigger(&a, &p);
     ext_trigger(&b, &q);
-    for (i = 0u; i < 5000u; ++i) {
-        int32_t d = ext_tick(&a, &p) - ext_tick(&b, &q);
+    for (i = 0u; i < 7000u; ++i) {
+        int32_t x = ext_tick(&a, &p);
+        int32_t y = ext_tick(&b, &q);
+        int32_t d = x - y;
+        if (x < -30000 || x > 30000 || y < -30000 || y > 30000) return 0u;
         total += (uint32_t)(d < 0 ? -d : d);
+    }
+    return total;
+}
+static uint64_t rendered_energy(ext_settings_t p)
+{
+    ext_kick_t s = {0};
+    uint64_t total = 0u;
+    uint32_t i;
+    ext_recalc(&p);
+    ext_trigger(&s, &p);
+    for (i = 0u; i < 7000u; ++i) {
+        int32_t x = ext_tick(&s, &p);
+        total += (uint32_t)(x < 0 ? -x : x);
     }
     return total;
 }
@@ -107,7 +113,8 @@ static int check_tuning(void)
         0u, 0u, 0u, 0u, 0, 0u, 0u,
         4u, 90u, 40u, 70u, 0u,
         78u, 48u, 75u, 90u, 0u, 0u, 0u, 0u, 0u,
-        0u, 0u, 0u, 0u
+        0u, 0u, 0u, 0u,
+        110u, 127u, 0u, 0, 0u, 0u, 0u, 0u, 0u
     };
     ext_kick_t k = {0};
     uint32_t i;
@@ -215,14 +222,73 @@ static int check_tuning(void)
             return 11;
         }
     }
-    if (wave_difference(p, 0u, 127u, 0u, 0u, 0u, 0u) < 2000000u ||
-        wave_difference(p, 0u, 0u, 0u, 127u, 0u, 0u) < 2000000u ||
-        wave_difference(p, 0u, 0u, 95u, 95u, 0u, 115u) < 2000000u) {
-        fprintf(stderr, "OSC MIX, FM INDEX or FEEDBACK has little signal effect\\n");
-        return 12;
+    /* LAYER excludes FM exactly, not only when INDEX=0.
+       Changing FM INDEX / RATIO / FEEDBACK must not change any output sample.
+     */
+    {
+        ext_settings_t a = p, b;
+        configure_voice(&a);
+        a.b_mode = 0u;  /* LAYER */
+        a.level_b = 110u;
+        b = a;
+        b.fm_depth = 0u;
+        b.fm_ratio_x2 = 16u;
+        b.fm_feedback = 127u;
+        if (rendered_difference(a, b) != 0u) {
+            fprintf(stderr, "LAYER unexpectedly reacts to FM settings\\n");
+            return 12;
+        }
+
+        /* OSC B pitch in LAYER is unrelated to FM RATIO; DETUNE matters. */
+        b = a;
+        b.b_detune_cents = 70;
+        if (rendered_difference(a, b) < 1000000u) {
+            fprintf(stderr, "B DETUNE does not affect the LAYER sound\\n");
+            return 13;
+        }
+
+        /* True independent levels, with no hidden sound at all gains 0. */
+        b = a; b.level_a = 0u; b.level_b = 0u; b.sub_body = 0u;
+        if (rendered_energy(b) != 0u) {
+            fprintf(stderr, "oscillator mixer not silent when all levels zero\\n");
+            return 14;
+        }
+        b = a; b.output_trim = 0u;
+        if (rendered_energy(b) != 0u) return 15;
+
+        /* MOD: B is modulation only. Moving its mixer gain changes nothing. */
+        a.b_mode = 1u;
+        b = a; b.level_b = 0u;
+        if (rendered_difference(a, b) != 0u) {
+            fprintf(stderr, "MOD leaks direct oscillator B into mixer\\n");
+            return 16;
+        }
+        /* MOD: oscillator B shapes the carrier when changing INDEX. */
+        b = a; b.fm_depth = 0u;
+        if (rendered_difference(a, b) < 1000000u) {
+            fprintf(stderr, "MOD is not generating effective FM\\n");
+            return 17;
+        }
+        b = a; b.fm_feedback = 0u;
+        if (rendered_difference(a, b) < 1000000u) {
+            fprintf(stderr, "MOD feedback has little audible effect\\n");
+            return 18;
+        }
+
+        /* BOTH: B is audible AND the source of FM. */
+        a.b_mode = 2u;
+        b = a; b.level_b = 0u;
+        if (rendered_difference(a, b) < 1000000u) {
+            fprintf(stderr, "BOTH cannot independently mix oscillator B\\n");
+            return 19;
+        }
+        b = a; b.fm_depth = 0u;
+        if (rendered_difference(a, b) < 1000000u) {
+            fprintf(stderr, "BOTH does not retain FM modulation\\n");
+            return 20;
+        }
     }
-    if (!wave_energy(p, 55u, 34u, 127u, 127u)) return 13;
-    puts("EXTRATONE CORE 0.5 morph/FM routing/feedback tests: OK");
+    puts("EXTRATONE CORE 0.6 OSC/LAYER/MOD/BOTH/MIX verified: OK");
     return 0;
 }
 int main(void) { return check_tuning(); }
