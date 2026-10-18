@@ -19,6 +19,7 @@ jobs:
           /tmp/extratone-test
           cc -O2 -Wall -Wno-unused-function -o /tmp/extratone-keyrate tests/test_keyrate_phase.c
           /tmp/extratone-keyrate
+          python tests/test_ui_labels.py
       - name: Compile and run the host firmware simulation
         run: bash tests/run_host.sh
       - name: Save synthesized audio and screens
