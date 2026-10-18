@@ -104,6 +104,109 @@ static uint64_t rendered_energy(ext_settings_t p)
     return total;
 }
 
+/* Regression for v0.8 complaint: removing SUB must not make A/B louder.
+ * Compare complete rendered PCM sample by sample. With LP24 bypassed,
+ * a no-SUB voice + isolated SUB must equal the mixed voice, regardless
+ * of how SUB LEVEL is moved, even with the existing DRIVE enabled.
+ * Keep OUT TRIM at 55 to leave headroom and avoid final clipping.
+ */
+static int check_sub_independence(void)
+{
+    static const uint32_t subs[] = {1u, 32u, 75u, 127u};
+    uint32_t mode, si, frame;
+    for (mode = 0u; mode < 3u; ++mode) {
+        for (si = 0u; si < sizeof(subs)/sizeof(subs[0]); ++si) {
+            ext_settings_t base = EXT_PRESETS[3].settings;
+            ext_settings_t mixed, isolated;
+            ext_kick_t a = {0}, b = {0}, c = {0};
+            base.b_mode = mode;
+            base.shape_a = 67u;
+            base.shape_b = 104u;
+            base.level_a = 106u;
+            base.level_b = 82u;
+            base.sub_body = 0u;
+            base.drive = 36u;
+            base.click_amount = 0u;
+            base.filter_bypass = 1u;
+            base.output_trim = 55u;
+            mixed = base;
+            mixed.sub_body = subs[si];
+            isolated = mixed;
+            isolated.level_a = 0u;
+            isolated.level_b = 0u;
+            ext_recalc(&base);
+            ext_recalc(&mixed);
+            ext_recalc(&isolated);
+            ext_trigger(&a, &base);
+            ext_trigger(&b, &mixed);
+            ext_trigger(&c, &isolated);
+            for (frame = 0u; frame < 10000u; ++frame) {
+                int32_t no_sub = ext_tick(&a, &base);
+                int32_t with_sub = ext_tick(&b, &mixed);
+                int32_t sub_only = ext_tick(&c, &isolated);
+                int32_t error = (with_sub - no_sub) - sub_only;
+                if (error < -2 || error > 2) {
+                    fprintf(stderr,
+                      "SUB alters OSC output: mode=%u level=%u frame=%u delta=%d\\n",
+                      (unsigned)mode,(unsigned)subs[si],(unsigned)frame,(int)error);
+                    return 35;
+                }
+            }
+        }
+    }
+    /* Changing LEVEL B must not renormalize OSC A either. */
+    for (mode = 0u; mode < 3u; mode += 2u) {
+        ext_settings_t base = EXT_PRESETS[1].settings, mixed, only_b;
+        ext_kick_t a = {0}, b = {0}, c = {0};
+        base.b_mode = mode;
+        base.level_a = 110u;
+        base.level_b = 0u;
+        base.sub_body = 0u;
+        base.drive = 0u;
+        base.click_amount = 0u;
+        base.filter_bypass = 1u;
+        base.output_trim = 50u;
+        mixed = base; mixed.level_b = 127u;
+        only_b = mixed; only_b.level_a = 0u;
+        ext_recalc(&base);
+        ext_recalc(&mixed);
+        ext_recalc(&only_b);
+        ext_trigger(&a, &base);
+        ext_trigger(&b, &mixed);
+        ext_trigger(&c, &only_b);
+        for (frame = 0u; frame < 8000u; ++frame) {
+            int32_t error = (ext_tick(&b,&mixed)-ext_tick(&a,&base))
+                                - ext_tick(&c,&only_b);
+            if (error < -2 || error > 2) {
+                fprintf(stderr,"LEVEL B changes A: mode=%u frame=%u delta=%d\\n",
+                        (unsigned)mode,(unsigned)frame,(int)error);
+                return 36;
+            }
+        }
+    }
+    /* Absolute stress, including all three channels at 127 and DRIVE max.
+     * Output can limit at the final stage but must never exceed PCM bounds.
+     */
+    {
+        ext_settings_t p = EXT_PRESETS[3].settings;
+        ext_kick_t v = {0};
+        p.b_mode = 2u;
+        p.level_a = 127u;
+        p.level_b = 127u;
+        p.sub_body = 127u;
+        p.drive = 127u;
+        p.output_trim = 127u;
+        p.filter_bypass = 1u;
+        ext_recalc(&p);
+        ext_trigger(&v, &p);
+        for (frame = 0u; frame < 10000u; ++frame) {
+            int32_t x = ext_tick(&v, &p);
+            if (x < -30000 || x > 30000) return 37;
+        }
+    }
+    return 0;
+}
+
 static int check_tuning(void)
 {
     static const int32_t semis[] = {-24, -12, 0, 12, 24};
@@ -390,7 +493,11 @@ static int check_tuning(void)
             return 28;
         }
     }
-    puts("EXTRATONE CORE 0.8 one-shot AHDR and pitch envelope: OK");
+    {
+        int mix_error = check_sub_independence();
+        if (mix_error) return mix_error;
+    }
+    puts("EXTRATONE CORE 0.9 independent A/B/SUB mixer and AHDR: OK");
     return 0;
 }
 int main(void) { return check_tuning(); }
