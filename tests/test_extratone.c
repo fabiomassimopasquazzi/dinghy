@@ -312,13 +312,22 @@ static int check_tuning(void)
     static const int32_t semis[] = {-24, -12, 0, 12, 24};
     static const uint32_t expected_sub[] = {10u, 20u, 40u, 80u, 160u};
     static const uint32_t expected_start[] = {250u, 500u, 1000u, 2000u, 4000u};
+    /* Designated initialization is mandatory when adding DSP parameters:
+     * positional field initializers are fragile across engine versions.
+     */
     ext_settings_t p = {
-        0u, 1000u, 40u, 35u, 175u, 44u, 35u,
-        0u, 0u, 0u, 0u, 0, 0u, 0u,
-        4u, 90u, 40u, 70u, 0u,
-        78u, 48u, 75u, 90u, 0u, 0u, 0u, 0u, 0u,
-        0u, 0u, 0u, 0u,
-        110u, 127u, 0u, 0, 0u, 0u, 0u, 0u, 0u
+        .rate_hz = 0u, .start_hz = 1000u, .end_hz = 40u,
+        .sweep_ms = 35u, .decay_ms = 175u, .fm_depth = 44u,
+        .drive = 35u, .tune_semitones = 0,
+        .fm_ratio_x2 = 4u, .fm_decay_ms = 90u,
+        .click_amount = 40u, .transient_ms = 8u,
+        .transient_color = 104u, .transient_route = 1u,
+        .sub_body = 70u, .filter_cutoff = 78u, .filter_res = 48u,
+        .filter_env_amt = 75u, .filter_env_ms = 90u,
+        .filter_route = 0u, .filter_bypass = 0u,
+        .level_a = 110u, .level_b = 0u, .output_trim = 127u,
+        .amp_attack_ms = 0u, .amp_hold_ms = 0u,
+        .amp_release_ms = 180u
     };
     ext_kick_t k = {0};
     uint32_t i;
