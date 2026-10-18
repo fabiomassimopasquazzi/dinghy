@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 0.7 for M-VAVE FM-1.
+ * EXTRATONE CORE 0.8 for M-VAVE FM-1.
  * All kick sound is synthesized in real-time: no samples.
  * The original Dinghy platform remains unchanged.
  */
@@ -73,7 +73,7 @@ static int set_cc(uint32_t cc, uint32_t val)
     else if (cc == 46u) p.b_detune_cents = (int32_t)(val * 200u / 127u) - 100;
     else if (cc == 47u) p.pitch_curve = val;
     else if (cc == 48u) p.amp_attack_ms = val * 100u / 127u;
-    else if (cc == 49u) p.amp_sustain = val;
+    else if (cc == 49u) p.amp_hold_ms = val * 1000u / 127u;
     else if (cc == 50u) p.amp_release_ms = 5u + val * 995u / 127u;
     else return 0;
     ext_recalc(&p);
@@ -155,7 +155,7 @@ static void show_panel(uint32_t page)
                       : page == 3u ? "LP24 FILTER"
                       : page == 4u ? "OSCILLATORS"
                       : page == 5u ? "A/B/SUB MIXER"
-                                   : "AMP ADSR ENVELOPE";
+                                   : "AMP AHDR ENVELOPE";
     show_preset();
     draw_text_box(0, 63, 240, &FONT_S, label, C_ACC, 1);
     if (page == 0u) {
@@ -191,13 +191,13 @@ static void show_panel(uint32_t page)
     } else {
         show_value(92, "A ATTACK", p.amp_attack_ms, "MS");
         show_value(118, "D DECAY", p.decay_ms, "MS");
-        show_value(144, "S SUSTAIN", p.amp_sustain, "");
+        show_value(144, "H HOLD", p.amp_hold_ms, "MS");
         show_value(170, "R RELEASE", p.amp_release_ms, "MS");
     }
     draw_text_box(0, 198, 240, &FONT_S,
                   page == 3u ? (p.filter_bypass ? "LP24 BYPASS" : p.filter_route ? "LP24 SUB SAFE" : "LP24 FULL SERIAL")
                              : page == 1u ? "CURVE 0=EXP 127=LIN"
-                             : page == 6u ? (p.amp_sustain ? "ADSR: HOLD NOTE" : "ADSR: ONE SHOT")
+                             : page == 6u ? "AHDR: ALWAYS ONE SHOT"
                              : page == 4u ? "SHAPE A / SHAPE B"
                              : b_mode_name(p.b_mode),
                   (page == 3u && p.filter_bypass) ? C_MUT : C_ACC, 1);
@@ -222,8 +222,8 @@ static void app_main(void)
     load_preset(0u);
     lcd_fill(0, 0, 240, 240, C_BLACK);
     draw_text_box(0, 13, 240, &FONT_L, "EXTRATONE", C_ACC, 1);
-    draw_text_box(0, 47, 240, &FONT_S, "EXTRATONE 0.7", C_MUT, 1);
-    draw_text_box(0, 222, 240, &FONT_S, "PRESETS KNOB / ARP=ADSR", C_MUT, 1);
+    draw_text_box(0, 47, 240, &FONT_S, "EXTRATONE 0.8", C_MUT, 1);
+    draw_text_box(0, 222, 240, &FONT_S, "PRESETS  ARP:AHDR  REC:CUT", C_MUT, 1);
     show_panel(page);
     for (;;) {
         uint32_t keys, down, up, b, released;
@@ -240,7 +240,7 @@ static void app_main(void)
             }
             if ((up >> k) & 1u) midi_send(0x80, KEY0 + k, 0);
         }
-        if (up && !keys && !p.roll_on) ext_note_off(&kick, &p);
+        /* Note-off deliberately does not truncate a drum one-shot. */
         if (keys != prev_leds) {
             for (k = 0; k < 27u; ++k)
                 fm1_led_key(KEY_LED(k), (keys >> k) & 1u);
@@ -255,6 +255,11 @@ static void app_main(void)
         if (b & (1u << BTN_SEQ)) { page = page == 5u ? 0u : 5u; dirty = 1; }
         if (b & (1u << BTN_ARP)) { page = page == 6u ? 0u : 6u; dirty = 1; }
         if (b & (1u << BTN_HOME)) { page = 0u; dirty = 1; }
+        if (b & (1u << BTN_REC)) {
+            p.roll_on = 0u;
+            ext_note_off(&kick, &p); /* explicit RELEASE / CUT */
+            dirty = 1u;
+        }
         if (b & (1u << BTN_GLO)) { p.filter_bypass ^= 1u; dirty = 1; }
         if (b & (1u << BTN_SEL)) { p.filter_route ^= 1u; dirty = 1; }
         if (b & (1u << BTN_PLAY)) {
@@ -314,7 +319,7 @@ static void app_main(void)
             } else if (page == 6u) {
                 p.amp_attack_ms = bounded_add(p.amp_attack_ms, d[0], 0u, 100u);
                 p.decay_ms = bounded_add(p.decay_ms, d[1] * 10, 10u, 1200u);
-                p.amp_sustain = bounded_add(p.amp_sustain, d[2] * 2, 0u, 127u);
+                p.amp_hold_ms = bounded_add(p.amp_hold_ms, d[2] * 10, 0u, 1000u);
                 p.amp_release_ms = bounded_add(p.amp_release_ms, d[3] * 10, 5u, 1000u);
             }
             if (page == 3u) {
@@ -330,10 +335,13 @@ static void app_main(void)
 
         while (midi_get(&st, &d1, &d2)) {
             if ((st & 0xF0u) == 0x90u && d2) ext_trigger(&kick, &p);
-            else if (((st & 0xF0u) == 0x80u ||
-                     ((st & 0xF0u) == 0x90u && !d2)) && !p.roll_on)
+            /* Ignore note-offs in ONE SHOT mode. CC52 = explicit CUT. */
+            else if ((st & 0xF0u) == 0xB0u && (st & 15u) == 0u &&
+                     d1 == 52u && d2 >= 64u) {
+                p.roll_on = 0u;
                 ext_note_off(&kick, &p);
-            else if ((st & 0xF0u) == 0xB0u && (st & 15u) == 0u)
+                dirty = 1u;
+            } else if ((st & 0xF0u) == 0xB0u && (st & 15u) == 0u)
                 if (set_cc(d1, d2)) dirty = 1;
         }
         if (dirty && fm1_ms - last_screen >= 55u) {
