@@ -24,6 +24,59 @@ int main(void)
         return fail("MIDI A3/A4/A5 frequency is wrong",1);
     if (ext_note_hz_q8(69u) != 2u*ext_note_hz_q8(57u))
         return fail("A4 is not an exact octave above A3",2);
+    /* Below 150 Hz we need true note frequencies, NOT integer Hz:
+     * C#3 138.59Hz, D3 146.83Hz, A2 110Hz, F2 87.31Hz.
+     * Physical keys are shifted by octaves only for retrigger rate.
+     */
+    if (ext_note_hz_q8(49u)!=35479u ||
+        ext_note_hz_q8(50u)!=37589u ||
+        ext_note_hz_q8(45u)!=28160u ||
+        ext_note_hz_q8(41u)!=22351u)
+        return fail("Low-note frequencies lost their fractional Hz",14);
+    if (ext_keyboard_rate_note(53u,-12)!=41u ||
+        ext_keyboard_rate_note(62u,-12)!=50u ||
+        ext_keyboard_rate_note(69u,0)!=69u ||
+        ext_keyboard_rate_note(53u,-24)!=29u ||
+        ext_keyboard_rate_note(79u,12)!=91u)
+        return fail("Physical keyboard octave mapping is wrong",15);
+    /* Holding a musical rate note must NOT transpose the sound source.
+     * Pitch remains on TUNE / START / END regardless of key.
+     */
+    {
+        ext_settings_t fixed = EXT_PRESETS[4].settings;
+        uint32_t start_pitch, end_pitch, roll_1, roll_2;
+        fixed.tune_semitones = -7;
+        fixed.key_roll_on = 1u;
+        fixed.key_rate_q8 = ext_note_hz_q8(50u);
+        ext_recalc(&fixed);
+        start_pitch = fixed.tuned_start_hz;
+        end_pitch = fixed.tuned_end_hz;
+        roll_1 = fixed.roll_step;
+        fixed.key_rate_q8 = ext_note_hz_q8(69u);
+        ext_recalc(&fixed);
+        roll_2 = fixed.roll_step;
+        if (fixed.tuned_start_hz != start_pitch ||
+            fixed.tuned_end_hz != end_pitch ||
+            roll_1 == roll_2)
+            return fail("KEY RATE changed kick pitch instead of only its retrigger clock",16);
+    }
+    {
+        ext_settings_t low = EXT_PRESETS[0].settings;
+        ext_kick_t kick = {0};
+        uint32_t ticks;
+        low.roll_on=0u;
+        low.key_roll_on=1u;
+        low.key_rate_q8=ext_note_hz_q8(50u);
+        ext_recalc(&low);
+        ext_trigger(&kick,&low);
+        /* Ten seconds: 146.83Hz gives approximately 1468 retriggers
+         * (rounded 147Hz would give 1470 and fail this regression).
+         */
+        for (ticks=0u;ticks<441000u;++ticks)
+            (void)ext_tick(&kick,&low);
+        if (kick.triggers < 1468u || kick.triggers > 1469u)
+            return fail("Fractional 146.83Hz retrigger accuracy failed",17);
+    }
     /* Two clean 220Hz sine oscillators with detune=0 must be perfectly
      * phase locked after every trigger. Any random low beating is a bug.
      */
@@ -104,6 +157,6 @@ int main(void)
     for(i=0u;i<2205u;++i)(void)ext_tick(&a,&q);
     if(a.amplitude_q15 < 28000u)
         return fail("100ms Attack did not reach full level",13);
-    puts("EXTRATONE 1.1 key note-rate, exact 220/440Hz, phase/attack: OK");
+    puts("EXTRATONE 1.2 fractional low-note KEY RATE, pitch independence and phase: OK");
     return 0;
 }
