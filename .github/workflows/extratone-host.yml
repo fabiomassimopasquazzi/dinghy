@@ -1,0 +1,24 @@
+name: EXTRATONE CORE host test
+on:
+  push:
+    branches: [feature/extratone-kick-v01]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  host-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install Pillow
+      - name: Compile and run the host firmware simulation
+        run: bash tests/run_host.sh
+      - name: Save synthesized audio and screens
+        uses: actions/upload-artifact@v4
+        with:
+          name: extratone-core-host-preview
+          path: |
+            build/host/*.wav
+            build/host/*.png
