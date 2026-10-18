@@ -75,7 +75,9 @@ static void show_note_rate(void)
     const char *note = KEY_NOTE_NAMES[current_key_note % 12u];
     buf[i++]='K';buf[i++]='E';buf[i++]='Y';buf[i++]=' ';
     while (*note && i<20u) buf[i++]=*note++;
-    buf[i++]=(char)('0'+ (current_key_note/12u)-1u);
+    if (current_key_note < 12u) buf[i++]='-';
+    buf[i++]=(char)('0'+ (current_key_note < 12u
+                                ? 1u : current_key_note/12u - 1u));
     buf[i++]=' ';
     v=(p.key_rate_q8+128u)>>8;
     do {rev[digits++]=(char)('0'+v%10u);v/=10u;} while(v&&digits<10u);
