@@ -267,13 +267,14 @@ static void show_panel(uint32_t page)
         draw_text_box(8, 170, 224, &FONT_S,
                       p.transient_route ? "ROUTE DIRECT" : "ROUTE LP24", C_WHITE, 0);
     }
-    draw_text_box(0, 198, 240, &FONT_S,
+    if (page != 4u) draw_text_box(0, 198, 240, &FONT_S,
                   page == 3u ? (p.filter_bypass ? "LP24 BYPASS" : p.filter_route ? "LP24 SUB SAFE" : "LP24 FULL SERIAL")
                              : page == 1u ? "CURVE 0=EXP 127=LIN"
-                             : page == 6u ? "BODY ADSR; HIT SEPARATE"
+                             : page == 6u ? "AHDR BODY; HIT SEPARATE"
                              : page == 4u ? "SHAPE A / SHAPE B"
                              : page == 5u ? "MIX: INDEPENDENT GAIN"
-                             : page == 7u ? "HIT=SINGLE  ROLL=REPEAT"
+                             : page == 7u ? (p.filter_bypass && !p.transient_route
+                                              ? "LP24 BYPASSED" : "HIT=SINGLE ROLL=REPEAT")
                              : page == 0u ? (p.key_rate_mode ? "OCT-:KEY RATE ON" : "OCT-:KEY RATE OFF")
                              : page == 2u && p.b_mode == 0u ? "FM OFF: LAYER"
                              : b_mode_name(p.b_mode),
