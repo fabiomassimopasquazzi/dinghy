@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 0.4.1 for M-VAVE FM-1.
+ * EXTRATONE CORE 0.5 for M-VAVE FM-1.
  * All kick sound is synthesized in real-time: no samples.
  * The original Dinghy platform remains unchanged.
  */
@@ -13,10 +13,11 @@
 
 static ext_kick_t kick;
 static ext_settings_t p = {
-    38u, 2300u, 48u, 35u, 175u, 7500u, 35u,
+    38u, 2300u, 48u, 35u, 175u, 44u, 22u,
     0u, 0u, 0u, 0u, 0, 0u, 0u,
     4u, 90u, 45u, 70u, 0u,
-    78u, 48u, 75u, 90u, 0u, 0u, 0u, 0u, 0u
+    95u, 48u, 75u, 90u, 0u, 0u, 0u, 0u, 0u,
+    55u, 106u, 34u, 35u
 };
 static void app_audio(int32_t *out, uint32_t n) { ext_audio(&kick, &p, out, n); }
 
@@ -37,7 +38,7 @@ static int set_cc(uint32_t cc, uint32_t val)
     else if (cc == 23u) p.sweep_ms = 3u + val * 347u / 127u;
     else if (cc == 24u) p.decay_ms = 20u + val * 1180u / 127u;
     else if (cc == 25u) p.drive = val;
-    else if (cc == 26u) p.fm_depth = val * 20000u / 127u;
+    else if (cc == 26u) p.fm_depth = val;
     else if (cc == 27u) p.roll_on = val >= 64u;
     else if (cc == 28u) p.tune_semitones = (int32_t)(val * 48u / 127u) - 24;
     else if (cc == 29u) p.fm_ratio_x2 = 1u + val * 15u / 127u;
@@ -50,6 +51,10 @@ static int set_cc(uint32_t cc, uint32_t val)
     else if (cc == 36u) p.filter_env_ms = 5u + val * 1495u / 127u;
     else if (cc == 37u) p.filter_bypass = val >= 64u;
     else if (cc == 38u) p.filter_route = val >= 64u;
+    else if (cc == 39u) p.shape_a = val;
+    else if (cc == 40u) p.shape_b = val;
+    else if (cc == 41u) p.osc_mix = val;
+    else if (cc == 42u) p.fm_feedback = val;
     else return 0;
     ext_recalc(&p);
     return 1;
@@ -85,17 +90,25 @@ static void show_ratio(void)
     s[11] = p.fm_ratio_x2 & 1u ? '5' : '0';
     draw_text_box(8, 92, 224, &FONT_S, s, C_WHITE, 0);
 }
+static const char *shape_name(uint32_t sh)
+{
+    if (sh < 32u) return "SINE-TRI";
+    if (sh < 64u) return "TRI-SAW";
+    if (sh < 96u) return "SAW-SQR";
+    return "SQR-PWM";
+}
 static void show_panel(uint32_t page)
 {
     const char *label = page == 0u ? "MAIN - PERFORMANCE"
                       : page == 1u ? "ENV - PITCH AND DECAY"
-                      : page == 2u ? "TIMBRE - FM ENGINE"
-                                   : "LP24 - RESONANT FILTER";
+                      : page == 2u ? "FM - RATIO INDEX FDBK"
+                      : page == 3u ? "LP24 - RESONANT FILTER"
+                                   : "OSC - TWO WAVE MORPHS";
     draw_text_box(0, 63, 240, &FONT_S, label, C_ACC, 1);
     if (page == 0u) {
         show_value(92, "RATE", p.rate_hz, "HZ");
         show_tune();
-        show_value(144, "FM", p.fm_depth, "");
+        show_value(144, "CLICK", p.click_amount, "");
         show_value(170, "DRIVE", p.drive, "");
     } else if (page == 1u) {
         show_value(92, "START", p.start_hz, "HZ");
@@ -104,19 +117,28 @@ static void show_panel(uint32_t page)
         show_value(170, "DECAY", p.decay_ms, "MS");
     } else if (page == 2u) {
         show_ratio();
-        show_value(118, "FM DECAY", p.fm_decay_ms, "MS");
-        show_value(144, "CLICK", p.click_amount, "");
-        show_value(170, "SUB BODY", p.sub_body, "");
-    } else {
+        show_value(118, "INDEX", p.fm_depth, "");
+        show_value(144, "FEEDBACK", p.fm_feedback, "");
+        show_value(170, "FM DECAY", p.fm_decay_ms, "MS");
+    } else if (page == 3u) {
         show_value(92, "CUTOFF", EXT_LP24_HZ[p.filter_cutoff], "HZ");
         show_value(118, "RESONANCE", p.filter_res, "");
         show_value(144, "ENV AMT", p.filter_env_amt, "");
         show_value(170, "ENV TIME", p.filter_env_ms, "MS");
+    } else {
+        show_value(92, "SHAPE A", p.shape_a, "");
+        show_value(118, "SHAPE B", p.shape_b, "");
+        show_value(144, "OSC MIX", p.osc_mix, "");
+        show_value(170, "SUB LEVEL", p.sub_body, "");
     }
     draw_text_box(0, 198, 240, &FONT_S,
                   page == 3u ? (p.filter_bypass ? "LP24 BYPASS" : p.filter_route ? "LP24 SUB SAFE" : "LP24 FULL SERIAL")
                              : (p.roll_on ? "ROLL ON" : "ROLL OFF"),
                   (page == 3u && p.filter_bypass) ? C_MUT : C_ACC, 1);
+    if (page == 4u) {
+        /* Show both morph regions; no invisible mode-dependent knob. */
+        draw_text_box(8, 198, 224, &FONT_S, shape_name(p.shape_a), C_ACC, 0);
+    }
 }
 
 static void app_main(void)
@@ -126,8 +148,8 @@ static void app_main(void)
     ext_recalc(&p);
     lcd_fill(0, 0, 240, 240, C_BLACK);
     draw_text_box(0, 13, 240, &FONT_L, "EXTRATONE", C_ACC, 1);
-    draw_text_box(0, 47, 240, &FONT_S, "FM KICK 0.4.1", C_MUT, 1);
-    draw_text_box(0, 222, 240, &FONT_S, "FX:LP24  SEL:PATH  GLO:BYP", C_MUT, 1);
+    draw_text_box(0, 47, 240, &FONT_S, "FM KICK 0.5", C_MUT, 1);
+    draw_text_box(0, 222, 240, &FONT_S, "LFO:OSC FX:LP24 EDIT:FM", C_MUT, 1);
     show_panel(page);
     for (;;) {
         uint32_t keys, down, up, b, released;
@@ -154,6 +176,7 @@ static void app_main(void)
         if (b & (1u << BTN_ENV)) { page = page == 1u ? 0u : 1u; dirty = 1; }
         if (b & (1u << BTN_EDIT)) { page = page == 2u ? 0u : 2u; dirty = 1; }
         if (b & (1u << BTN_FX)) { page = page == 3u ? 0u : 3u; dirty = 1; }
+        if (b & (1u << BTN_LFO)) { page = page == 4u ? 0u : 4u; dirty = 1; }
         if (b & (1u << BTN_GLO)) { p.filter_bypass ^= 1u; dirty = 1; }
         if (b & (1u << BTN_SEL)) { p.filter_route ^= 1u; dirty = 1; }
         if (b & (1u << BTN_PLAY)) {
@@ -164,6 +187,7 @@ static void app_main(void)
         fm1_led_key(BTN_ENV, page == 1u);
         fm1_led_key(BTN_EDIT, page == 2u);
         fm1_led_key(BTN_FX, page == 3u);
+        fm1_led_key(BTN_LFO, page == 4u);
         fm1_led_key(BTN_GLO, p.filter_bypass == 0u);
         fm1_led_key(BTN_SEL, p.filter_route != 0u);
         fm1_led_key(BTN_PLAY, p.roll_on != 0u);
@@ -173,7 +197,7 @@ static void app_main(void)
                 p.rate_hz = bounded_add(p.rate_hz, d[0], 0u, 150u);
                 p.tune_semitones = (int32_t)bounded_add((uint32_t)(p.tune_semitones + 24),
                                                         d[1], 0u, 48u) - 24;
-                p.fm_depth = bounded_add(p.fm_depth, d[2] * 250, 0u, 20000u);
+                p.click_amount = bounded_add(p.click_amount, d[2] * 2, 0u, 127u);
                 p.drive = bounded_add(p.drive, d[3] * 2, 0u, 127u);
             } else if (page == 1u) {
                 p.start_hz = bounded_add(p.start_hz, d[0] * 80, 80u, 6000u);
@@ -182,8 +206,13 @@ static void app_main(void)
                 p.decay_ms = bounded_add(p.decay_ms, d[3] * 10, 20u, 1200u);
             } else if (page == 2u) {
                 p.fm_ratio_x2 = bounded_add(p.fm_ratio_x2, d[0], 1u, 16u);
-                p.fm_decay_ms = bounded_add(p.fm_decay_ms, d[1] * 5, 5u, 500u);
-                p.click_amount = bounded_add(p.click_amount, d[2] * 2, 0u, 127u);
+                p.fm_depth = bounded_add(p.fm_depth, d[1] * 2, 0u, 127u);
+                p.fm_feedback = bounded_add(p.fm_feedback, d[2] * 2, 0u, 127u);
+                p.fm_decay_ms = bounded_add(p.fm_decay_ms, d[3] * 5, 5u, 500u);
+            } else if (page == 4u) {
+                p.shape_a = bounded_add(p.shape_a, d[0], 0u, 127u);
+                p.shape_b = bounded_add(p.shape_b, d[1], 0u, 127u);
+                p.osc_mix = bounded_add(p.osc_mix, d[2] * 2, 0u, 127u);
                 p.sub_body = bounded_add(p.sub_body, d[3] * 2, 0u, 127u);
             }
             if (page == 3u) {
