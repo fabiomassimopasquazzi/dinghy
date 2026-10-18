@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 0.4: resonant, saturated four-pole low-pass and clean sub.
+ * EXTRATONE CORE 0.4.1: serial LP24 routing, optional sub-preserving split.
  * No samples, no floating point, no allocation, no 64-bit division.
  */
 #ifndef EXTRATONE_KICK_H
@@ -35,6 +35,7 @@ typedef struct {
     uint32_t filter_span;    /* cached envelope span in LUT indices */
     uint32_t filter_res_q12; /* cached nonlinear feedback gain */
     uint32_t filter_env_coef;/* cached decay, Q16 */
+    uint32_t filter_route;   /* 0 = FULL SERIAL (all audio), 1 = SUB SAFE parallel sub */
 } ext_settings_t;
 
 typedef struct {
@@ -204,7 +205,8 @@ static void ext_trigger(ext_kick_t *s, const ext_settings_t *p)
 static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
 {
     uint32_t target, diff, fall, step, level;
-    int32_t mod, carrier, sample, gain, sub;
+    int32_t mod, carrier, sample, gain, sub, click_signal, main_signal;
+    int32_t dry_main_gain;
     uint32_t depth, noise;
     if (p->roll_on && p->period_q16) {
         s->retrigger_clock_q16 += 65536u;
@@ -250,29 +252,41 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
     if (sample > 30000) sample = 30000;
     if (sample < -30000) sample = -30000;
 
-    /* The aggressive carrier goes through LP24. Clean SUB is mixed AFTER it. */
-    sample = ext_filter_lp24(s, p, sample);
-
-    /* A separate clean sub at tuned END Hz survives strong main-path drive.
-       Free-running phase prevents full phase restarts on every retrigger. */
+    /* FM body has already passed DRIVE above. The clean sine sub runs
+     * independently, without restarting its phase at each trigger.
+     */
     s->sub_phase += (p->tuned_end_hz << 8) * 380u;
     sub = (ext_sine(s->sub_phase) * (int32_t)s->amplitude_q15) >> 15;
-    sample = (sample * (int32_t)(127u - (p->sub_body * 3u / 4u))
-            + sub * (int32_t)p->sub_body) / 127;
+    dry_main_gain = (int32_t)(127u - (p->sub_body * 3u / 4u));
+    main_signal = (sample * dry_main_gain) / 127;
 
-    /* Synthetic noise click (not a sample), with a short fixed decay. */
+    /* The noise transient MUST follow the chosen filter routing too.
+     * This is a synthesized click, no sample playback.
+     */
+    click_signal = 0;
     if (s->click_env_q15 > 4u) {
         noise = s->noise_state;
         noise ^= noise << 13;
         noise ^= noise >> 17;
         noise ^= noise << 5;
         s->noise_state = noise;
-        sample += ((((int32_t)(noise >> 16) - 32768)
-                  * (int32_t)s->click_env_q15) >> 15)
-                  * (int32_t)p->click_amount / 127;
+        click_signal = ((((int32_t)(noise >> 16) - 32768)
+                       * (int32_t)s->click_env_q15) >> 15)
+                       * (int32_t)p->click_amount / 127;
         s->click_env_q15 = (s->click_env_q15 * 31200u) >> 15;
     } else s->click_env_q15 = 0;
 
+    /* FULL SERIAL: filter the entire kick (FM body + SUB + CLICK).
+     * SUB SAFE: filter FM body + CLICK; route only the clean sine around it.
+     * LP24 bypass, controlled by GLO, still bypasses ALL filtering.
+     */
+    if (p->filter_route == 0u) {
+        sample = main_signal + (sub * (int32_t)p->sub_body) / 127 + click_signal;
+        sample = ext_filter_lp24(s, p, sample);
+    } else {
+        sample = ext_filter_lp24(s, p, main_signal + click_signal);
+        sample += (sub * (int32_t)p->sub_body) / 127;
+    }
     if (sample > 30000) sample = 30000;
     if (sample < -30000) sample = -30000;
 
