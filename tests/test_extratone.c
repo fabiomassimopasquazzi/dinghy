@@ -6,6 +6,36 @@
 #include "../firmware/src/extratone_kick.h"
 
 static int near(uint32_t a, uint32_t b) { return a + 1u >= b && b + 1u >= a; }
+static uint64_t routing_energy(ext_settings_t p, uint32_t route, uint32_t cutoff)
+{
+    ext_kick_t k = {0};
+    uint64_t total = 0;
+    uint32_t i;
+    p.rate_hz = 0u;
+    p.roll_on = 0u;
+    p.start_hz = 130u;
+    p.end_hz = 130u;
+    p.tune_semitones = 0;
+    p.decay_ms = 900u;
+    p.drive = 0u;
+    p.fm_depth = 0u;
+    p.click_amount = 0u;
+    p.sub_body = 127u; /* emphasize the old parallel leakage */
+    p.filter_cutoff = cutoff;
+    p.filter_env_amt = 0u;
+    p.filter_res = 0u;
+    p.filter_bypass = 0u;
+    p.filter_route = route;
+    ext_recalc(&p);
+    ext_trigger(&k, &p);
+    for (i = 0u; i < 5500u; ++i) {
+        int32_t y = ext_tick(&k, &p);
+        if (i > 512u)
+            total += (uint32_t)(y < 0 ? -y : y);
+    }
+    return total;
+}
+
 static int check_tuning(void)
 {
     static const int32_t semis[] = {-24, -12, 0, 12, 24};
@@ -15,7 +45,7 @@ static int check_tuning(void)
         0u, 1000u, 40u, 35u, 175u, 7500u, 35u,
         0u, 0u, 0u, 0u, 0, 0u, 0u,
         4u, 90u, 40u, 70u, 0u,
-        78u, 48u, 75u, 90u, 0u, 0u, 0u, 0u
+        78u, 48u, 75u, 90u, 0u, 0u, 0u, 0u, 0u
     };
     ext_kick_t k = {0};
     uint32_t i;
@@ -88,7 +118,23 @@ static int check_tuning(void)
         p.filter_bypass = 1u;
         if (ext_filter_lp24(&filt, &p, 12345) != 12345) return 8;
     }
-    puts("EXTRATONE CORE 0.4 tuning, FM, LP24 and resonance tests: OK");
+    /* Verify the actual complete signal path, not just a standalone LP stage.
+     * At 30 Hz cutoff, a 130 Hz SUB MUST be strongly attenuated in FULL SERIAL;
+     * the same SUB is intentionally preserved by the legacy SUB SAFE route.
+     */
+    {
+        uint64_t full_low = routing_energy(p, 0u, 0u);
+        uint64_t split_low = routing_energy(p, 1u, 0u);
+        uint64_t full_open = routing_energy(p, 0u, 127u);
+        if (!full_low || !split_low || !full_open ||
+            full_low * 4u >= split_low || full_low * 4u >= full_open) {
+            fprintf(stderr, "routing ineffective: FULL low %llu, SUB SAFE low %llu, FULL open %llu\\n",
+                    (unsigned long long)full_low, (unsigned long long)split_low,
+                    (unsigned long long)full_open);
+            return 9;
+        }
+    }
+    puts("EXTRATONE CORE 0.4.1 full-serial filter routing tests: OK");
     return 0;
 }
 int main(void) { return check_tuning(); }
