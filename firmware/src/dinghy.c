@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 1.1 for M-VAVE FM-1.
+ * EXTRATONE CORE 1.2 for M-VAVE FM-1.
  * All kick sound is synthesized in real-time: no samples.
  * The original Dinghy platform remains unchanged.
  */
@@ -18,6 +18,12 @@ static uint32_t active_preset;
 static uint32_t preset_edited;
 static uint32_t current_key_note = 69u;
 static uint32_t midi_key_held, midi_key_note;
+/* KEY RATE only: map the 27 physical keys one octave below by default.
+ * ALG knob selects -24 / -12 / 0 / +12 semitones.
+ * Sound design pitch remains controlled by MAIN TUNE / PITCH ENV.
+ */
+static int32_t key_octave_shift = -12;
+static int32_t held_physical_key_index = -1;
 static void app_audio(int32_t *out, uint32_t n) { ext_audio(&kick, &p, out, n); }
 
 static uint32_t bounded_add(uint32_t v, int32_t delta, uint32_t min, uint32_t max)
@@ -40,6 +46,7 @@ static void load_preset(uint32_t ix)
     p.key_roll_on = 0u;
     p.key_rate_q8 = 0u;
     midi_key_held = 0u;
+    held_physical_key_index = -1;
     p.roll_on = 0u; /* preset switching stops automatic retrigger */
     preset_edited = 0u;
     ext_recalc(&p);
@@ -49,6 +56,10 @@ static void load_preset(uint32_t ix)
 /* A musical note sets the *retrigger frequency* of the whole kick.
  * A3 (MIDI 57) = 220Hz, A4 (69) = 440Hz. Main RATE knob stays manual.
  */
+static uint32_t physical_key_rate_note(uint32_t key_index)
+{
+    return ext_keyboard_rate_note(KEY0 + key_index, key_octave_shift);
+}
 static void start_key_rate(uint32_t note)
 {
     current_key_note = note > 127u ? 127u : note;
@@ -67,23 +78,48 @@ static void stop_key_rate(void)
 static const char *const KEY_NOTE_NAMES[12] = {
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
 };
+/* Display cents precision: Q8 Hertz -> exact rounded hundredths.
+ * No floating point or snprintf on the microcontroller. 146.83Hz is
+ * rendered as "146.83", not incorrectly rounded to 147Hz.
+ */
+static void append_unsigned(char *buf, uint32_t *length, uint32_t value)
+{
+    char reversed[12];
+    uint32_t n=0u;
+    do {
+        reversed[n++]=(char)('0'+value%10u);
+        value/=10u;
+    } while(value && n<10u);
+    while(n)buf[(*length)++]=reversed[--n];
+}
 static void show_note_rate(void)
 {
     char buf[36];
-    uint32_t i=0u, v, digits=0u;
-    char rev[12];
-    const char *note = KEY_NOTE_NAMES[current_key_note % 12u];
+    const char *note=KEY_NOTE_NAMES[current_key_note%12u];
+    uint32_t i=0u;
+    uint32_t hundredths = (p.key_rate_q8 * 100u + 128u) >> 8;
     buf[i++]='K';buf[i++]='E';buf[i++]='Y';buf[i++]=' ';
-    while (*note && i<20u) buf[i++]=*note++;
-    if (current_key_note < 12u) buf[i++]='-';
-    buf[i++]=(char)('0'+ (current_key_note < 12u
-                                ? 1u : current_key_note/12u - 1u));
+    while(*note && i<20u)buf[i++]=*note++;
+    if(current_key_note<12u)buf[i++]='-';
+    append_unsigned(buf,&i,current_key_note<12u?1u:current_key_note/12u-1u);
     buf[i++]=' ';
-    v=(p.key_rate_q8+128u)>>8;
-    do {rev[digits++]=(char)('0'+v%10u);v/=10u;} while(v&&digits<10u);
-    while(digits)buf[i++]=rev[--digits];
-    buf[i++]=' ';buf[i++]='H';buf[i++]='z';buf[i]=0;
+    append_unsigned(buf,&i,hundredths/100u);
+    buf[i++]='.';
+    buf[i++]=(char)('0'+(hundredths/10u)%10u);
+    buf[i++]=(char)('0'+hundredths%10u);
+    buf[i++]=' ';buf[i++]='H';buf[i++]='z';
+    buf[i]=0;
     draw_text_box(8, 92, 224, &FONT_S, buf, C_WHITE, 0);
+}
+static void show_keyboard_octave(void)
+{
+    char buf[] = "KEY OCT -12 ALG";
+    int32_t value=key_octave_shift;
+    uint32_t n=(uint32_t)(value<0?-value:value);
+    buf[8]=value<0?'-':'+';
+    buf[9]=(char)('0'+(n/10u)%10u);
+    buf[10]=(char)('0'+n%10u);
+    draw_text_box(0,198,240,&FONT_S,buf,C_ACC,1);
 }
 /* MIDI CCs, channel 1, for Faderfox EC4 and Ableton. */
 static int set_cc(uint32_t cc, uint32_t val)
@@ -267,7 +303,8 @@ static void show_panel(uint32_t page)
         draw_text_box(8, 170, 224, &FONT_S,
                       p.transient_route ? "ROUTE DIRECT" : "ROUTE LP24", C_WHITE, 0);
     }
-    if (page != 4u) draw_text_box(0, 198, 240, &FONT_S,
+    if (page == 0u && p.key_rate_mode) show_keyboard_octave();
+    else if (page != 4u) draw_text_box(0, 198, 240, &FONT_S,
                   page == 3u ? (p.filter_bypass ? "LP24 BYPASS" : p.filter_route ? "LP24 SUB SAFE" : "LP24 FULL SERIAL")
                              : page == 1u ? "CURVE 0=EXP 127=LIN"
                              : page == 6u ? "AHDR BODY; HIT SEPARATE"
@@ -300,8 +337,8 @@ static void app_main(void)
     load_preset(0u);
     lcd_fill(0, 0, 240, 240, C_BLACK);
     draw_text_box(0, 13, 240, &FONT_L, "EXTRATONE", C_ACC, 1);
-    draw_text_box(0, 47, 240, &FONT_S, "EXTRATONE 1.1", C_MUT, 1);
-    draw_text_box(0, 222, 240, &FONT_S, "OCT-:KEYRATE OCT+:HIT", C_MUT, 1);
+    draw_text_box(0, 47, 240, &FONT_S, "EXTRATONE 1.2", C_MUT, 1);
+    draw_text_box(0, 222, 240, &FONT_S, "OCT-:KEY ALG:OCT OCT+:HIT", C_MUT, 1);
     show_panel(page);
     for (;;) {
         uint32_t keys, down, up, b, released;
@@ -314,29 +351,31 @@ static void app_main(void)
         for (k = 0; k < 27u; ++k) {
             if ((down >> k) & 1u) {
                 if (p.key_rate_mode) {
-                    start_key_rate(KEY0 + k);
+                    held_physical_key_index = (int32_t)k;
+                    start_key_rate(physical_key_rate_note(k));
                     dirty = 1u;
                 } else ext_trigger(&kick, &p);
                 midi_send(0x90, KEY0 + k, 100);
             }
             if ((up >> k) & 1u) midi_send(0x80, KEY0 + k, 0);
         }
-        if (p.key_rate_mode && up && !down) {
-            uint32_t current_bit = current_key_note >= KEY0
-                       && current_key_note < KEY0 + 27u
-                       ? 1u << (current_key_note-KEY0) : 0u;
-            if (current_bit && (up & current_bit)) {
-                if (keys) {
-                    for (k = 0; k < 27u; ++k)
-                        if (keys & (1u << k)) {
-                            start_key_rate(KEY0+k);
-                            break;
-                        }
-                } else if (midi_key_held) {
-                    start_key_rate(midi_key_note);
-                } else stop_key_rate();
-                dirty = 1u;
-            }
+        /* Release of a *physical* key is compared with the physical
+         * index, not the transposed MIDI note (which may be <KEY0).
+         */
+        if (p.key_rate_mode && up && held_physical_key_index >= 0
+            && (up & (1u << (uint32_t)held_physical_key_index))) {
+            held_physical_key_index = -1;
+            if (keys) {
+                for (k = 0u; k < 27u; ++k)
+                    if (keys & (1u << k)) {
+                        held_physical_key_index = (int32_t)k;
+                        start_key_rate(physical_key_rate_note(k));
+                        break;
+                    }
+            } else if (midi_key_held) {
+                start_key_rate(midi_key_note); /* external MIDI unshifted */
+            } else stop_key_rate();
+            dirty = 1u;
         }
         /* Note-off deliberately does not truncate a drum one-shot. */
         if (keys != prev_leds) {
@@ -355,7 +394,10 @@ static void app_main(void)
         if (b & (1u << BTN_OCT_UP)) { page = page == 7u ? 0u : 7u; dirty = 1; }
         if (b & (1u << BTN_OCT_DOWN)) {
             p.key_rate_mode ^= 1u;
-            if (!p.key_rate_mode) stop_key_rate();
+            if (!p.key_rate_mode) {
+                stop_key_rate();
+                held_physical_key_index = -1;
+            }
             page = 0u;
             dirty = 1u;
         }
@@ -392,6 +434,21 @@ static void app_main(void)
                     load_preset(ix);
                     dirty = 1u;
                 }
+            }
+        }
+        /* ALG encoder changes *only* the physical keyboard's clock
+         * octave. The MAIN TUNE knob and PITCH ENV are never touched.
+         */
+        {
+            int32_t delta = fm1_enc_take(ENC_ALGORITHM);
+            if (delta && p.key_rate_mode) {
+                key_octave_shift = (int32_t)bounded_add(
+                    (uint32_t)(key_octave_shift+24),delta*12,0u,36u)-24;
+                if (held_physical_key_index >= 0 &&
+                    (keys & (1u << (uint32_t)held_physical_key_index)))
+                    start_key_rate(physical_key_rate_note(
+                        (uint32_t)held_physical_key_index));
+                dirty=1u;
             }
         }
         for (k = 0; k < 4u; ++k) d[k] = fm1_enc_take(ENC_KNOB1 + k);
@@ -451,6 +508,7 @@ static void app_main(void)
                 if (p.key_rate_mode) {
                     midi_key_held = 1u;
                     midi_key_note = d1;
+                    held_physical_key_index = -1;
                     start_key_rate(d1);
                     dirty = 1u;
                 } else ext_trigger(&kick, &p);
@@ -461,7 +519,8 @@ static void app_main(void)
                 if (keys) {
                     for (k=0u;k<27u;++k)
                         if (keys & (1u << k)) {
-                            start_key_rate(KEY0+k);
+                            held_physical_key_index = (int32_t)k;
+                            start_key_rate(physical_key_rate_note(k));
                             break;
                         }
                 } else stop_key_rate();
