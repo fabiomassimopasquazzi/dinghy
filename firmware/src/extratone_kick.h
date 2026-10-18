@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 1.1: musical keyboard-rate extratone, phase reset and attack verification.
+ * EXTRATONE CORE 1.2: decimal low-note KEY RATE, independent oscillator tuning.
  * No samples, no floating point, no allocation, no 64-bit division.
  */
 #ifndef EXTRATONE_KICK_H
@@ -8,7 +8,7 @@
 #define EXT_FS 44100u
 
 typedef struct {
-    uint32_t rate_hz;     /* 0..150 Hz, independent of master tempo */
+    uint32_t rate_hz;     /* 0..1000 Hz manual roll, independent of pitch */
     uint32_t start_hz;    /* 80..6000 Hz, pitch envelope start */
     uint32_t end_hz;      /* 20..260 Hz, final fundamental */
     uint32_t sweep_ms;    /* 3..350 ms, pitch drop */
@@ -300,6 +300,16 @@ static const uint32_t EXT_MIDI_HZ_Q8[128] = {
     1350154u, 1430439u, 1515497u, 1605613u, 1701088u, 1802240u, 1909407u, 2022946u,
     2143237u, 2270680u, 2405702u, 2548752u, 2700309u, 2860878u, 3030994u, 3211227u
 };
+/* Physical-key octave selection changes ONLY the clock note lookup.
+ * Never modifies start/end pitch, TUNE, transposition or FM ratios.
+ */
+static uint32_t ext_keyboard_rate_note(uint32_t raw_note, int32_t octave_shift)
+{
+    int32_t midi = (int32_t)raw_note + octave_shift;
+    if (midi < 0) return 0u;
+    if (midi > 127) return 127u;
+    return (uint32_t)midi;
+}
 static uint32_t ext_note_hz_q8(uint32_t midi_note)
 {
     return EXT_MIDI_HZ_Q8[midi_note > 127u ? 127u : midi_note];
