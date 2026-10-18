@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 0.4 for M-VAVE FM-1.
+ * EXTRATONE CORE 0.4.1 for M-VAVE FM-1.
  * All kick sound is synthesized in real-time: no samples.
  * The original Dinghy platform remains unchanged.
  */
@@ -16,7 +16,7 @@ static ext_settings_t p = {
     38u, 2300u, 48u, 35u, 175u, 7500u, 35u,
     0u, 0u, 0u, 0u, 0, 0u, 0u,
     4u, 90u, 45u, 70u, 0u,
-    78u, 48u, 75u, 90u, 0u, 0u, 0u, 0u
+    78u, 48u, 75u, 90u, 0u, 0u, 0u, 0u, 0u
 };
 static void app_audio(int32_t *out, uint32_t n) { ext_audio(&kick, &p, out, n); }
 
@@ -49,6 +49,7 @@ static int set_cc(uint32_t cc, uint32_t val)
     else if (cc == 35u) p.filter_env_amt = val;
     else if (cc == 36u) p.filter_env_ms = 5u + val * 1495u / 127u;
     else if (cc == 37u) p.filter_bypass = val >= 64u;
+    else if (cc == 38u) p.filter_route = val >= 64u;
     else return 0;
     ext_recalc(&p);
     return 1;
@@ -113,7 +114,7 @@ static void show_panel(uint32_t page)
         show_value(170, "ENV TIME", p.filter_env_ms, "MS");
     }
     draw_text_box(0, 198, 240, &FONT_S,
-                  page == 3u ? (p.filter_bypass ? "LP24 BYPASS" : "LP24 ON  SUB SAFE")
+                  page == 3u ? (p.filter_bypass ? "LP24 BYPASS" : p.filter_route ? "LP24 SUB SAFE" : "LP24 FULL SERIAL")
                              : (p.roll_on ? "ROLL ON" : "ROLL OFF"),
                   (page == 3u && p.filter_bypass) ? C_MUT : C_ACC, 1);
 }
@@ -125,8 +126,8 @@ static void app_main(void)
     ext_recalc(&p);
     lcd_fill(0, 0, 240, 240, C_BLACK);
     draw_text_box(0, 13, 240, &FONT_L, "EXTRATONE", C_ACC, 1);
-    draw_text_box(0, 47, 240, &FONT_S, "FM KICK 0.4", C_MUT, 1);
-    draw_text_box(0, 222, 240, &FONT_S, "FX FILTER  GLO BYPASS", C_MUT, 1);
+    draw_text_box(0, 47, 240, &FONT_S, "FM KICK 0.4.1", C_MUT, 1);
+    draw_text_box(0, 222, 240, &FONT_S, "FX:LP24  SEL:PATH  GLO:BYP", C_MUT, 1);
     show_panel(page);
     for (;;) {
         uint32_t keys, down, up, b, released;
@@ -154,6 +155,7 @@ static void app_main(void)
         if (b & (1u << BTN_EDIT)) { page = page == 2u ? 0u : 2u; dirty = 1; }
         if (b & (1u << BTN_FX)) { page = page == 3u ? 0u : 3u; dirty = 1; }
         if (b & (1u << BTN_GLO)) { p.filter_bypass ^= 1u; dirty = 1; }
+        if (b & (1u << BTN_SEL)) { p.filter_route ^= 1u; dirty = 1; }
         if (b & (1u << BTN_PLAY)) {
             p.roll_on ^= 1u;
             if (p.roll_on && p.rate_hz) ext_trigger(&kick, &p);
@@ -163,6 +165,7 @@ static void app_main(void)
         fm1_led_key(BTN_EDIT, page == 2u);
         fm1_led_key(BTN_FX, page == 3u);
         fm1_led_key(BTN_GLO, p.filter_bypass == 0u);
+        fm1_led_key(BTN_SEL, p.filter_route != 0u);
         fm1_led_key(BTN_PLAY, p.roll_on != 0u);
         for (k = 0; k < 4u; ++k) d[k] = fm1_enc_take(ENC_KNOB1 + k);
         if (d[0] || d[1] || d[2] || d[3]) {
