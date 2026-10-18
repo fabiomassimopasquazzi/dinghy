@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 0.3 for M-VAVE FM-1.
+ * EXTRATONE CORE 0.4 for M-VAVE FM-1.
  * All kick sound is synthesized in real-time: no samples.
  * The original Dinghy platform remains unchanged.
  */
@@ -15,7 +15,8 @@ static ext_kick_t kick;
 static ext_settings_t p = {
     38u, 2300u, 48u, 35u, 175u, 7500u, 35u,
     0u, 0u, 0u, 0u, 0, 0u, 0u,
-    4u, 90u, 45u, 70u, 0u
+    4u, 90u, 45u, 70u, 0u,
+    78u, 48u, 75u, 90u, 0u, 0u, 0u, 0u
 };
 static void app_audio(int32_t *out, uint32_t n) { ext_audio(&kick, &p, out, n); }
 
@@ -43,6 +44,11 @@ static int set_cc(uint32_t cc, uint32_t val)
     else if (cc == 30u) p.fm_decay_ms = 5u + val * 495u / 127u;
     else if (cc == 31u) p.click_amount = val;
     else if (cc == 32u) p.sub_body = val;
+    else if (cc == 33u) p.filter_cutoff = val;
+    else if (cc == 34u) p.filter_res = val;
+    else if (cc == 35u) p.filter_env_amt = val;
+    else if (cc == 36u) p.filter_env_ms = 5u + val * 1495u / 127u;
+    else if (cc == 37u) p.filter_bypass = val >= 64u;
     else return 0;
     ext_recalc(&p);
     return 1;
@@ -82,7 +88,8 @@ static void show_panel(uint32_t page)
 {
     const char *label = page == 0u ? "MAIN - PERFORMANCE"
                       : page == 1u ? "ENV - PITCH AND DECAY"
-                                   : "TIMBRE - FM ENGINE";
+                      : page == 2u ? "TIMBRE - FM ENGINE"
+                                   : "LP24 - RESONANT FILTER";
     draw_text_box(0, 63, 240, &FONT_S, label, C_ACC, 1);
     if (page == 0u) {
         show_value(92, "RATE", p.rate_hz, "HZ");
@@ -94,13 +101,21 @@ static void show_panel(uint32_t page)
         show_value(118, "END", p.end_hz, "HZ");
         show_value(144, "SWEEP", p.sweep_ms, "MS");
         show_value(170, "DECAY", p.decay_ms, "MS");
-    } else {
+    } else if (page == 2u) {
         show_ratio();
         show_value(118, "FM DECAY", p.fm_decay_ms, "MS");
         show_value(144, "CLICK", p.click_amount, "");
         show_value(170, "SUB BODY", p.sub_body, "");
+    } else {
+        show_value(92, "CUTOFF", EXT_LP24_HZ[p.filter_cutoff], "HZ");
+        show_value(118, "RESONANCE", p.filter_res, "");
+        show_value(144, "ENV AMT", p.filter_env_amt, "");
+        show_value(170, "ENV TIME", p.filter_env_ms, "MS");
     }
-    draw_text_box(0, 198, 240, &FONT_S, p.roll_on ? "ROLL ON" : "ROLL OFF", p.roll_on ? C_ACC : C_MUT, 1);
+    draw_text_box(0, 198, 240, &FONT_S,
+                  page == 3u ? (p.filter_bypass ? "LP24 BYPASS" : "LP24 ON  SUB SAFE")
+                             : (p.roll_on ? "ROLL ON" : "ROLL OFF"),
+                  (page == 3u && p.filter_bypass) ? C_MUT : C_ACC, 1);
 }
 
 static void app_main(void)
@@ -110,8 +125,8 @@ static void app_main(void)
     ext_recalc(&p);
     lcd_fill(0, 0, 240, 240, C_BLACK);
     draw_text_box(0, 13, 240, &FONT_L, "EXTRATONE", C_ACC, 1);
-    draw_text_box(0, 47, 240, &FONT_S, "FM KICK 0.3", C_MUT, 1);
-    draw_text_box(0, 222, 240, &FONT_S, "ENV / EDIT / PLAY", C_MUT, 1);
+    draw_text_box(0, 47, 240, &FONT_S, "FM KICK 0.4", C_MUT, 1);
+    draw_text_box(0, 222, 240, &FONT_S, "FX FILTER  GLO BYPASS", C_MUT, 1);
     show_panel(page);
     for (;;) {
         uint32_t keys, down, up, b, released;
@@ -137,6 +152,8 @@ static void app_main(void)
         b = fm1_input_edges(&released);
         if (b & (1u << BTN_ENV)) { page = page == 1u ? 0u : 1u; dirty = 1; }
         if (b & (1u << BTN_EDIT)) { page = page == 2u ? 0u : 2u; dirty = 1; }
+        if (b & (1u << BTN_FX)) { page = page == 3u ? 0u : 3u; dirty = 1; }
+        if (b & (1u << BTN_GLO)) { p.filter_bypass ^= 1u; dirty = 1; }
         if (b & (1u << BTN_PLAY)) {
             p.roll_on ^= 1u;
             if (p.roll_on && p.rate_hz) ext_trigger(&kick, &p);
@@ -144,6 +161,8 @@ static void app_main(void)
         }
         fm1_led_key(BTN_ENV, page == 1u);
         fm1_led_key(BTN_EDIT, page == 2u);
+        fm1_led_key(BTN_FX, page == 3u);
+        fm1_led_key(BTN_GLO, p.filter_bypass == 0u);
         fm1_led_key(BTN_PLAY, p.roll_on != 0u);
         for (k = 0; k < 4u; ++k) d[k] = fm1_enc_take(ENC_KNOB1 + k);
         if (d[0] || d[1] || d[2] || d[3]) {
@@ -163,6 +182,12 @@ static void app_main(void)
                 p.fm_decay_ms = bounded_add(p.fm_decay_ms, d[1] * 5, 5u, 500u);
                 p.click_amount = bounded_add(p.click_amount, d[2] * 2, 0u, 127u);
                 p.sub_body = bounded_add(p.sub_body, d[3] * 2, 0u, 127u);
+            }
+            if (page == 3u) {
+                p.filter_cutoff = bounded_add(p.filter_cutoff, d[0], 0u, 127u);
+                p.filter_res = bounded_add(p.filter_res, d[1], 0u, 127u);
+                p.filter_env_amt = bounded_add(p.filter_env_amt, d[2], 0u, 127u);
+                p.filter_env_ms = bounded_add(p.filter_env_ms, d[3] * 10, 5u, 1500u);
             }
             ext_recalc(&p);
             dirty = 1;
