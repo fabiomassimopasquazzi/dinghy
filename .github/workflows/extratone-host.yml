@@ -1,7 +1,7 @@
 name: EXTRATONE CORE host test
 on:
   push:
-    branches: [feature/extratone-kick-v01]
+    branches: [feature/extratone-kick-v01, feature/extratone-kick-v02]
   pull_request:
   workflow_dispatch:
 jobs:
