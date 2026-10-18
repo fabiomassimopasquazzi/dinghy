@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 0.6: LAYER/MOD/BOTH routing, shared pitch sweep and proper A/B/SUB mixer.
+ * EXTRATONE CORE 0.7: distinct pitch envelope and gated amplitude ADSR.
  * No samples, no floating point, no allocation, no 64-bit division.
  */
 #ifndef EXTRATONE_KICK_H
@@ -49,6 +49,14 @@ typedef struct {
     uint32_t ab_normal_q15; /* normalizes A+B without forcing clipping */
     uint32_t main_mix_q15;  /* normalized FM/body mix versus SUB */
     uint32_t sub_mix_q15;   /* normalized sub gain */
+    uint32_t pitch_curve;   /* 0 EXP drop .. 127 LINEAR drop */
+    uint32_t pitch_linear_step_q8; /* difference divided by sweep frames */
+    uint32_t amp_attack_ms;/* 0..100 ms */
+    uint32_t amp_sustain;  /* 0..127 sustain fraction */
+    uint32_t amp_release_ms;/* 5..1000 ms */
+    uint32_t amp_attack_step;/* calculated outside ISR */
+    uint32_t amp_sustain_q15;
+    uint32_t amp_release_coef;
 } ext_settings_t;
 
 typedef struct {
@@ -60,6 +68,7 @@ typedef struct {
     int32_t lp24[4];          /* four one-pole states; zero latency, no audio buffers */
     uint32_t filter_env_q15, filter_coeff_q15, filter_frames;
     int32_t fm_last;         /* last modulator sample for audio-rate feedback */
+    uint32_t amp_stage, amp_gate; /* 0 idle 1 attack 2 decay 3 sustain 4 release */
 } ext_kick_t;
 
 static int32_t ext_sine(uint32_t phase)
@@ -266,10 +275,30 @@ static void ext_recalc(ext_settings_t *p)
     p->period_q16 = r ? (EXT_FS << 16) / r : 0u;
     p->sweep_coef = 6818u / (p->sweep_ms ? p->sweep_ms : 1u);
     if (p->sweep_coef > 2272u) p->sweep_coef = 2272u;
+    if (p->pitch_curve > 127u) p->pitch_curve = 127u;
     p->tuned_start_hz = ext_transpose_hz(p->start_hz, p->tune_semitones);
     p->tuned_end_hz = ext_transpose_hz(p->end_hz, p->tune_semitones);
+    {
+        uint32_t difference = p->tuned_start_hz > p->tuned_end_hz
+            ? p->tuned_start_hz - p->tuned_end_hz
+            : p->tuned_end_hz - p->tuned_start_hz;
+        uint32_t frames = (p->sweep_ms * 441u + 5u) / 10u;
+        if (!frames) frames = 1u;
+        p->pitch_linear_step_q8 = ((difference << 8) + frames - 1u) / frames;
+    }
     p->decay_coef = 10268u / (p->decay_ms ? p->decay_ms : 1u);
     if (p->decay_coef > 32767u) p->decay_coef = 32767u;
+    if (p->amp_attack_ms > 100u) p->amp_attack_ms = 100u;
+    if (p->amp_sustain > 127u) p->amp_sustain = 127u;
+    p->amp_sustain_q15 = (30000u * p->amp_sustain) / 127u;
+    if (!p->amp_attack_ms) p->amp_attack_step = 30000u;
+    else {
+        uint32_t frames = (p->amp_attack_ms * 441u + 5u) / 10u;
+        p->amp_attack_step = (30000u + frames - 1u) / frames;
+        if (!p->amp_attack_step) p->amp_attack_step = 1u;
+    }
+    p->amp_release_coef = 10268u / (p->amp_release_ms ? p->amp_release_ms : 1u);
+    if (p->amp_release_coef > 32767u) p->amp_release_coef = 32767u;
     p->fm_decay_coef = 10268u / (p->fm_decay_ms ? p->fm_decay_ms : 1u);
     if (p->fm_decay_coef > 32767u) p->fm_decay_coef = 32767u;
     if (p->filter_cutoff > 127u) p->filter_cutoff = 127u;
@@ -303,7 +332,9 @@ static void ext_trigger(ext_kick_t *s, const ext_settings_t *p)
     s->carrier_phase = 0;
     s->mod_phase = 0;
     s->pitch_q8 = p->tuned_start_hz << 8;
-    s->amplitude_q15 = 30000;
+    s->amp_gate = 1u;
+    s->amp_stage = p->amp_attack_ms ? 1u : 2u;
+    s->amplitude_q15 = p->amp_attack_ms ? 0u : 30000u;
     s->fm_env_q15 = 32767u;
     s->fm_last = 0;
     s->click_env_q15 = 32767u;
@@ -312,6 +343,51 @@ static void ext_trigger(ext_kick_t *s, const ext_settings_t *p)
     s->triggers++;
     s->noise_state ^= (s->triggers * 2654435761u);
     if (!s->noise_state) s->noise_state = 1u;
+}
+
+/* Real gated amplitude ADSR. With SUSTAIN=0, a kick remains a one-shot
+ * through its D stage even when a short MIDI note ends early.
+ * No division, buffers, or floating point inside the audio ISR.
+ */
+static void ext_note_off(ext_kick_t *s, const ext_settings_t *p)
+{
+    s->amp_gate = 0u;
+    if (s->amp_stage == 0u || s->amp_stage == 4u) return;
+    /* Drum one-shot: finish its DECAY rather than truncate on key-up. */
+    if (!p->amp_sustain && s->amp_stage == 2u) return;
+    s->amp_stage = 4u;
+}
+
+static void ext_amp_tick(ext_kick_t *s, const ext_settings_t *p)
+{
+    uint32_t fall, target = p->amp_sustain_q15;
+    if (s->amp_stage == 1u) { /* ATTACK */
+        uint32_t next = s->amplitude_q15 + p->amp_attack_step;
+        if (next >= 30000u) {
+            s->amplitude_q15 = 30000u;
+            s->amp_stage = 2u;
+        } else s->amplitude_q15 = next;
+    } else if (s->amp_stage == 2u) { /* DECAY */
+        if (s->amplitude_q15 > target) {
+            uint32_t diff = s->amplitude_q15 - target;
+            fall = (diff * p->decay_coef) >> 16;
+            if (!fall) fall = 1u;
+            s->amplitude_q15 = diff > fall ? s->amplitude_q15 - fall : target;
+        }
+        if (s->amplitude_q15 <= target) {
+            s->amplitude_q15 = target;
+            s->amp_stage = s->amp_gate ? 3u : 4u;
+        }
+    } else if (s->amp_stage == 3u) { /* SUSTAIN */
+        s->amplitude_q15 = target;
+        if (!s->amp_gate) s->amp_stage = 4u;
+    } else if (s->amp_stage == 4u) { /* RELEASE */
+        fall = (s->amplitude_q15 * p->amp_release_coef) >> 16;
+        if (!fall) fall = 1u;
+        s->amplitude_q15 = s->amplitude_q15 > fall
+            ? s->amplitude_q15 - fall : 0u;
+        if (!s->amplitude_q15) s->amp_stage = 0u;
+    } else s->amplitude_q15 = 0u;
 }
 
 static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
@@ -330,6 +406,7 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
     } else {
         s->retrigger_clock_q16 = 0;
     }
+    ext_amp_tick(s, p);
     if (!s->amplitude_q15 && s->click_env_q15 == 0u
         && s->lp24[0] == 0 && s->lp24[1] == 0
         && s->lp24[2] == 0 && s->lp24[3] == 0) return 0;
@@ -339,12 +416,18 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
     if (s->pitch_q8 > target) {
         diff = s->pitch_q8 - target;
         fall = ((diff >> 8) * p->sweep_coef) >> 8;
-        if (!fall) fall = 1;
+        if (!fall) fall = 1u;
+        fall = (fall * (127u - p->pitch_curve)
+               + p->pitch_linear_step_q8 * p->pitch_curve + 63u) / 127u;
+        if (!fall) fall = 1u;
         s->pitch_q8 = diff > fall ? s->pitch_q8 - fall : target;
     } else if (s->pitch_q8 < target) {
         diff = target - s->pitch_q8;
         fall = ((diff >> 8) * p->sweep_coef) >> 8;
-        if (!fall) fall = 1;
+        if (!fall) fall = 1u;
+        fall = (fall * (127u - p->pitch_curve)
+               + p->pitch_linear_step_q8 * p->pitch_curve + 63u) / 127u;
+        if (!fall) fall = 1u;
         s->pitch_q8 = diff > fall ? s->pitch_q8 + fall : target;
     }
 
@@ -435,10 +518,7 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
     if (!fall && s->fm_env_q15) fall = 1u;
     s->fm_env_q15 = s->fm_env_q15 > fall ? s->fm_env_q15 - fall : 0u;
 
-    /* Exponential amplitude decay, ~-60 dB at decay_ms. */
-    fall = (s->amplitude_q15 * p->decay_coef) >> 16;
-    if (!fall) fall = 1;
-    s->amplitude_q15 = s->amplitude_q15 > fall ? s->amplitude_q15 - fall : 0;
+    /* Amplitude is updated by ext_amp_tick, not by the pitch envelope. */
     return sample;
 }
 
