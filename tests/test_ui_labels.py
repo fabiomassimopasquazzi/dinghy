@@ -29,10 +29,13 @@ required = [
     '"BOTH: FM + B"', "KEY RATE ON", "KEY RATE OFF",
     '"AHDR BODY; HIT SEPARATE"', '"HIT=SINGLE ROLL=REPEAT"',
     'show_note_rate();', 'EXT_MIDI_HZ_Q8',
+    'show_keyboard_octave();', 'ext_keyboard_rate_note', 
+    'KEY OCT -12 ALG', "ENC_ALGORITHM",
+    'hundredths/100u',
     'lcd_fill(0, 45, 240, 175, C_BLACK);',
 ]
 for item in required:
-    if item == 'EXT_MIDI_HZ_Q8':
+    if item in ('EXT_MIDI_HZ_Q8', 'ext_keyboard_rate_note'):
         from_dsp = Path("firmware/src/extratone_kick.h").read_text()
         assert item in from_dsp, item
     else:
