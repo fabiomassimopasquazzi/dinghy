@@ -26,7 +26,7 @@ required = [
     '"P START"', '"P END"', '"P SWEEP"', '"P CURVE"',
     '"LEVEL A"', '"LEVEL B"', '"SUB LEVEL"', '"OUT TRIM"',
     '"FM OFF: LAYER"', '"LAYER: A+B"', '"MOD: B TO A FM"',
-    '"BOTH: FM + B"', '"KEY RATE ON"', '"KEY RATE OFF"',
+    '"BOTH: FM + B"', "KEY RATE ON", "KEY RATE OFF",
     '"AHDR BODY; HIT SEPARATE"', '"HIT=SINGLE ROLL=REPEAT"',
     'show_note_rate();', 'EXT_MIDI_HZ_Q8',
     'lcd_fill(0, 45, 240, 175, C_BLACK);',
