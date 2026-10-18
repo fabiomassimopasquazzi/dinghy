@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 0.9 for M-VAVE FM-1.
+ * EXTRATONE CORE 1.0 for M-VAVE FM-1.
  * All kick sound is synthesized in real-time: no samples.
  * The original Dinghy platform remains unchanged.
  */
@@ -55,7 +55,7 @@ static int set_cc(uint32_t cc, uint32_t val)
     else if (cc == 28u) p.tune_semitones = (int32_t)(val * 48u / 127u) - 24;
     else if (cc == 29u) p.fm_ratio_x2 = 1u + val * 15u / 127u;
     else if (cc == 30u) p.fm_decay_ms = 5u + val * 495u / 127u;
-    else if (cc == 31u) p.click_amount = val;
+    else if (cc == 31u) p.click_amount = val; /* now TRANSIENT LEVEL */
     else if (cc == 32u) p.sub_body = val;
     else if (cc == 33u) p.filter_cutoff = val;
     else if (cc == 34u) p.filter_res = val;
@@ -75,6 +75,9 @@ static int set_cc(uint32_t cc, uint32_t val)
     else if (cc == 48u) p.amp_attack_ms = val * 100u / 127u;
     else if (cc == 49u) p.amp_hold_ms = val * 1000u / 127u;
     else if (cc == 50u) p.amp_release_ms = 5u + val * 995u / 127u;
+    else if (cc == 53u) p.transient_ms = 1u + val * 39u / 127u;
+    else if (cc == 54u) p.transient_color = val;
+    else if (cc == 55u) p.transient_route = val >= 64u;
     else return 0;
     ext_recalc(&p);
     preset_edited = 1u;
@@ -155,13 +158,14 @@ static void show_panel(uint32_t page)
                       : page == 3u ? "LP24 FILTER"
                       : page == 4u ? "OSCILLATORS"
                       : page == 5u ? "A/B/SUB MIXER"
-                                   : "AMP AHDR ENVELOPE";
+                      : page == 6u ? "AMP AHDR ENVELOPE"
+                                   : "TRANSIENT ENGINE";
     show_preset();
     draw_text_box(0, 63, 240, &FONT_S, label, C_ACC, 1);
     if (page == 0u) {
         show_value(92, "RATE", p.rate_hz, "HZ");
         show_tune();
-        show_value(144, "CLICK", p.click_amount, "");
+        show_value(144, "HIT", p.click_amount, "");
         show_value(170, "DRIVE", p.drive, "");
     } else if (page == 1u) {
         show_value(92, "P START", p.start_hz, "HZ");
@@ -188,11 +192,17 @@ static void show_panel(uint32_t page)
         show_value(118, "LEVEL B", p.level_b, "");
         show_value(144, "SUB LEVEL", p.sub_body, "");
         show_value(170, "OUT TRIM", p.output_trim, "");
-    } else {
+    } else if (page == 6u) {
         show_value(92, "A ATTACK", p.amp_attack_ms, "MS");
         show_value(118, "D DECAY", p.decay_ms, "MS");
         show_value(144, "H HOLD", p.amp_hold_ms, "MS");
         show_value(170, "R RELEASE", p.amp_release_ms, "MS");
+    } else {
+        show_value(92, "HIT LEVEL", p.click_amount, "");
+        show_value(118, "HIT TIME", p.transient_ms, "MS");
+        show_value(144, "HIT COLOR", p.transient_color, "");
+        draw_text_box(8, 170, 224, &FONT_S,
+                      p.transient_route ? "ROUTE DIRECT" : "ROUTE LP24", C_WHITE, 0);
     }
     draw_text_box(0, 198, 240, &FONT_S,
                   page == 3u ? (p.filter_bypass ? "LP24 BYPASS" : p.filter_route ? "LP24 SUB SAFE" : "LP24 FULL SERIAL")
@@ -200,6 +210,7 @@ static void show_panel(uint32_t page)
                              : page == 6u ? "AHDR: ALWAYS ONE SHOT"
                              : page == 4u ? "SHAPE A / SHAPE B"
                              : page == 5u ? "MIX: INDEPENDENT GAIN"
+                             : page == 7u ? "COLOR 0=TONE 127=NOISE"
                              : b_mode_name(p.b_mode),
                   (page == 3u && p.filter_bypass) ? C_MUT : C_ACC, 1);
     if (page == 4u) {
@@ -223,8 +234,8 @@ static void app_main(void)
     load_preset(0u);
     lcd_fill(0, 0, 240, 240, C_BLACK);
     draw_text_box(0, 13, 240, &FONT_L, "EXTRATONE", C_ACC, 1);
-    draw_text_box(0, 47, 240, &FONT_S, "EXTRATONE 0.9", C_MUT, 1);
-    draw_text_box(0, 222, 240, &FONT_S, "PRESETS  ARP:AHDR  REC:CUT", C_MUT, 1);
+    draw_text_box(0, 47, 240, &FONT_S, "EXTRATONE 1.0", C_MUT, 1);
+    draw_text_box(0, 222, 240, &FONT_S, "OCT+:HIT  ARP:AHDR", C_MUT, 1);
     show_panel(page);
     for (;;) {
         uint32_t keys, down, up, b, released;
@@ -255,6 +266,7 @@ static void app_main(void)
         if (b & (1u << BTN_LFO)) { page = page == 4u ? 0u : 4u; dirty = 1; }
         if (b & (1u << BTN_SEQ)) { page = page == 5u ? 0u : 5u; dirty = 1; }
         if (b & (1u << BTN_ARP)) { page = page == 6u ? 0u : 6u; dirty = 1; }
+        if (b & (1u << BTN_OCT_UP)) { page = page == 7u ? 0u : 7u; dirty = 1; }
         if (b & (1u << BTN_HOME)) { page = 0u; dirty = 1; }
         if (b & (1u << BTN_REC)) {
             p.roll_on = 0u;
@@ -275,6 +287,7 @@ static void app_main(void)
         fm1_led_key(BTN_LFO, page == 4u);
         fm1_led_key(BTN_SEQ, page == 5u);
         fm1_led_key(BTN_ARP, page == 6u);
+        fm1_led_key(BTN_OCT_UP, page == 7u);
         fm1_led_key(BTN_GLO, p.filter_bypass == 0u);
         fm1_led_key(BTN_SEL, p.filter_route != 0u);
         fm1_led_key(BTN_PLAY, p.roll_on != 0u);
@@ -322,6 +335,11 @@ static void app_main(void)
                 p.decay_ms = bounded_add(p.decay_ms, d[1] * 10, 10u, 1200u);
                 p.amp_hold_ms = bounded_add(p.amp_hold_ms, d[2] * 10, 0u, 1000u);
                 p.amp_release_ms = bounded_add(p.amp_release_ms, d[3] * 10, 5u, 1000u);
+            } else if (page == 7u) {
+                p.click_amount = bounded_add(p.click_amount, d[0] * 2, 0u, 127u);
+                p.transient_ms = bounded_add(p.transient_ms, d[1], 1u, 40u);
+                p.transient_color = bounded_add(p.transient_color, d[2] * 2, 0u, 127u);
+                if (d[3]) p.transient_route = d[3] > 0 ? 1u : 0u;
             }
             if (page == 3u) {
                 p.filter_cutoff = bounded_add(p.filter_cutoff, d[0], 0u, 127u);
