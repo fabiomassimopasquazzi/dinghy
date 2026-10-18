@@ -13,82 +13,20 @@
  * What platform.c offers: docs/API.md. The chip's rules: docs/RULES.md. */
 #include "platform.c"
 
-/* ---- the sound (runs in the audio ISR: keep it short, no flash, no screen) */
-#define NV 4u                                   /* voices */
-static struct {
-    volatile uint32_t inc;                      /* phase step per frame: f * 2^32 / 44100 */
-    volatile int32_t gate;                      /* target level, Q15: 0 = released */
-    int32_t amp;                                /* the level now: glides to gate, no clicks */
-    uint32_t ph, age;
-    uint8_t note;
-} voice[NV];
-
-static int32_t sine(uint32_t ph)                /* a full cycle over 2^32 -> -32767..32767 (a refined parabola, ~0.1 %) */
-{
-    int32_t x = (int32_t)ph >> 16, ax = x < 0 ? -x : x, y, ay;
-    y = (x * (32768 - ax)) >> 13;               /* 4x(1-|x|), Q15 */
-    ay = y < 0 ? -y : y;
-    y += ((((y * ay) >> 15) - y) * 7373) >> 15; /* + 0.225 (y|y| - y) */
-    return y > 32767 ? 32767 : y < -32767 ? -32767 : y;
-}
-
-static void app_audio(int32_t *out, uint32_t n)
-{
-    uint32_t v, i;
-    for (v = 0; v < NV; v++) {
-        uint32_t ph = voice[v].ph, step = voice[v].inc;
-        int32_t amp = voice[v].amp, g = voice[v].gate;
-        if (!amp && !g)
-            continue;                           /* silent: costs nothing */
-        for (i = 0; i < n; i++) {
-            int32_t s;
-            if (amp < g) { amp += 48; if (amp > g) amp = g; }        /* attack ~5 ms */
-            else if (amp > g) { amp -= 6; if (amp < g) amp = g; }    /* release ~45 ms */
-            ph += step;
-            s = (sine(ph) * amp) >> 15;
-            out[2u * i] += s;                   /* L */
-            out[2u * i + 1u] += s;              /* R */
-        }
-        voice[v].ph = ph;
-        voice[v].amp = amp;
-    }
-}
-
-/* ---- notes (main loop) */
-static const uint32_t INC_C9[12] = {            /* MIDI 120..131 (C9..B9); lower octaves shift right */
-    815363807u, 863847862u, 915214929u, 969636441u, 1027294024u, 1088380105u,
-    1153098554u, 1221665363u, 1294309365u, 1371273005u, 1452813141u, 1539201906u};
-static uint32_t ages, last_note = 255;
-
+/* ---- EXTRATONE CORE: sample-free digital FM kick */
+#include "extratone_kick.h"
+static ext_kick_t kick;
+static ext_settings_t params = {0, 340, 55, 8, 10, 7600, 55};
+static uint32_t last_note = 255;
+static void app_audio(int32_t *out, uint32_t n) { ext_audio(&kick, &params, out, n); }
 static void play(uint32_t note, uint32_t vel)
 {
-    uint32_t v, pick = 0, best = 0xFFFFFFFFu;
     if (note > 127u || !vel) return;
-    for (v = 0; v < NV; v++) {                  /* the same note, else a free voice, else the oldest */
-        uint32_t score = voice[v].note == note && voice[v].gate ? 0u
-                       : voice[v].gate ? 0x80000000u + voice[v].age : (uint32_t)voice[v].amp + 1u;
-        if (score < best) { best = score; pick = v; }
-    }
-    voice[pick].note = (uint8_t)note;
-    voice[pick].age = ++ages;
-    voice[pick].inc = INC_C9[note % 12u] >> (10u - note / 12u);
-    voice[pick].gate = (int32_t)(vel * 90u);    /* 127 -> 11430: four voices stay under full scale */
     last_note = note;
+    ext_trigger(&kick, &params);
 }
-static void stop(uint32_t note)
-{
-    uint32_t v;
-    for (v = 0; v < NV; v++)
-        if (voice[v].note == note)
-            voice[v].gate = 0;
-}
-static int quiet(void)                          /* nothing sounds, not even a release */
-{
-    uint32_t v;
-    for (v = 0; v < NV; v++)
-        if (voice[v].gate || voice[v].amp) return 0;
-    return 1;
-}
+static void stop(uint32_t note) { (void)note; }
+static int quiet(void) { return kick.amplitude_q15 == 0; }
 
 /* ---- the screen: the name, the last note big, the keyboard with what sounds, the octave */
 #define C_ACC RGB(180, 140, 255)                /* lilac, as the logo */
@@ -136,6 +74,22 @@ static void draw_status(int32_t oct)
     draw_text_box(0, 212, 240, &FONT_S, s, C_OFF, 1);
 }
 
+/* All CC on channel 1. No host computer needed for internal panel control. */
+static void cc(uint32_t number, uint32_t value)
+{
+    if (number == 20u) params.rate_hz = value * 150u / 127u;
+    else if (number == 21u) params.start_hz = 80u + value * 820u / 127u;
+    else if (number == 22u) params.end_hz = 30u + value * 120u / 127u;
+    else if (number == 23u) params.sweep_shift = 6u + value * 6u / 127u;
+    else if (number == 24u) params.decay_shift = 8u + value * 4u / 127u;
+    else if (number == 25u) params.drive = value;
+    else if (number == 26u) params.fm_depth = value * 16000u / 127u;
+}
+static uint32_t adjust(uint32_t x, int32_t delta, uint32_t lo, uint32_t hi)
+{
+    int32_t y = (int32_t)x + delta;
+    return (uint32_t)(y < (int32_t)lo ? (int32_t)lo : y > (int32_t)hi ? (int32_t)hi : y);
+}
 static void app_main(void)
 {
     struct { int8_t oct; } set = {0};           /* what survives a power-off (add yours, up to 256 bytes) */
@@ -147,7 +101,7 @@ static void app_main(void)
 
     lcd_fill(0, 0, 240, 240, C_BLACK);
     draw_text_box(0, 18, 240, &FONT_L, APP_NAME, C_ACC, 1);
-    draw_text_box(0, 52, 240, &FONT_S, "a sine to build on  v" APP_VER, C_OFF, 1);
+    draw_text_box(0, 52, 240, &FONT_S, "FM KICK CORE 0.1", C_OFF, 1);
 
     for (;;) {
         uint32_t keys, down, up, rel, b, lit = 0, base = (uint32_t)(KEY0 + 12 * set.oct);
@@ -170,12 +124,15 @@ static void app_main(void)
         while (midi_get(&st, &d1, &d2)) {       /* USB-MIDI in, any channel */
             if ((st & 0xF0u) == 0x90u && d2) play(d1, d2);
             else if ((st & 0xF0u) == 0x80u || (st & 0xF0u) == 0x90u) stop(d1);
+            else if ((st & 0xF0u) == 0xB0u && (st & 0x0Fu) == 0u) cc(d1, d2);
         }
 
+        params.rate_hz = adjust(params.rate_hz, fm1_enc_take(ENC_KNOB1), 0u, 150u);
+        params.start_hz = adjust(params.start_hz, 5 * fm1_enc_take(ENC_KNOB2), 80u, 900u);
+        params.fm_depth = adjust(params.fm_depth, 125 * fm1_enc_take(ENC_KNOB3), 0u, 16000u);
+        params.drive = adjust(params.drive, fm1_enc_take(ENC_KNOB4), 0u, 127u);
         base = (uint32_t)(KEY0 + 12 * set.oct);
-        for (k = 0; k < NV; k++)                /* what sounds, on the keys of this octave */
-            if (voice[k].gate && voice[k].note >= base && voice[k].note < base + 27u)
-                lit |= 1u << (voice[k].note - base);
+        lit = keys;  /* LED reflects the physical keys currently pressed */
         for (k = 0; k < 27u; k++)
             fm1_led_key(KEY_LED(k), lit >> k & 1u);
         fm1_led_key(BTN_OCT_DOWN, set.oct < 0);
