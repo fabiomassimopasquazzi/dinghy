@@ -88,6 +88,26 @@ static uint32_t ext_transpose_hz(uint32_t base_hz, int32_t semitones)
  * Values are 1-exp(-2*pi*f/fs) in Q15, computed offline.
  * Updating only once per 16 frames avoids float/division in audio ISR.
  */
+/* Readable cutoff values used by LCD UI, same logarithmic table. */
+static const uint16_t EXT_LP24_HZ[128] = {
+    30u, 31u, 33u, 35u, 36u, 38u, 40u, 42u,
+    44u, 46u, 48u, 50u, 53u, 55u, 58u, 61u,
+    64u, 67u, 70u, 74u, 77u, 81u, 85u, 89u,
+    93u, 98u, 102u, 107u, 112u, 118u, 124u, 129u,
+    136u, 142u, 149u, 156u, 164u, 172u, 180u, 189u,
+    198u, 208u, 218u, 228u, 239u, 251u, 263u, 275u,
+    289u, 303u, 317u, 333u, 349u, 366u, 383u, 402u,
+    421u, 442u, 463u, 485u, 509u, 533u, 559u, 586u,
+    614u, 644u, 675u, 708u, 742u, 778u, 815u, 855u,
+    896u, 939u, 985u, 1032u, 1082u, 1134u, 1189u, 1247u,
+    1307u, 1370u, 1436u, 1505u, 1578u, 1654u, 1734u, 1818u,
+    1906u, 1998u, 2095u, 2196u, 2302u, 2413u, 2530u, 2652u,
+    2780u, 2914u, 3055u, 3203u, 3357u, 3519u, 3689u, 3868u,
+    4055u, 4250u, 4456u, 4671u, 4897u, 5133u, 5381u, 5641u,
+    5914u, 6199u, 6499u, 6813u, 7142u, 7487u, 7848u, 8228u,
+    8625u, 9042u, 9478u, 9936u, 10416u, 10920u, 11447u, 12000u
+};
+
 static const uint16_t EXT_LP24_COEFF_Q15[128] = {
     140u, 146u, 154u, 161u, 169u, 177u, 185u, 194u,
     204u, 213u, 224u, 234u, 246u, 258u, 270u, 283u,
