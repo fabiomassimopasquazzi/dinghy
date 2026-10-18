@@ -312,24 +312,62 @@ static int check_tuning(void)
             }
         }
     }
-    /* Gated ADSR: raised attack; sustain persists with held note; note-off
-       eventually releases. SUSTAIN=0 preserves one-shot decay.
+    /* AHDR is always finite: a held note never produces sustain.
+     * Verify the whole attack->hold->decay timeline without note-off.
      */
     {
-        ext_settings_t adsr = EXT_PRESETS[6].settings;
+        ext_settings_t p7 = EXT_PRESETS[6].settings;
         ext_kick_t v = {0};
-        uint32_t j, a;
-        ext_recalc(&adsr);
-        ext_trigger(&v, &adsr);
+        uint32_t j, rising;
+        ext_recalc(&p7);
+        ext_trigger(&v, &p7);
         if (v.amplitude_q15 != 0u || v.amp_stage != 1u) return 24;
-        for (j = 0; j < 1300u; ++j) (void)ext_tick(&v, &adsr);
-        a = v.amplitude_q15;
-        if (a < 1000u || a >= 30000u) return 25;
-        for (j = 0; j < 26000u; ++j) (void)ext_tick(&v, &adsr);
-        if (v.amp_stage != 3u || v.amplitude_q15 < 18000u) return 26;
-        ext_note_off(&v, &adsr);
-        for (j = 0; j < 26000u; ++j) (void)ext_tick(&v, &adsr);
-        if (v.amp_stage != 0u || v.amplitude_q15 != 0u) return 27;
+        for (j = 0u; j < 1000u; ++j) (void)ext_tick(&v, &p7);
+        rising = v.amplitude_q15;
+        if (rising < 1000u || rising >= 30000u) return 25;
+        for (j = 0u; j < 1400u; ++j) (void)ext_tick(&v, &p7);
+        if (v.amp_stage != 2u || v.amplitude_q15 != 30000u) return 26;
+        for (j = 0u; j < p7.amp_hold_frames + 15u; ++j)
+            (void)ext_tick(&v, &p7);
+        if (v.amp_stage != 3u || v.amplitude_q15 >= 30000u) return 27;
+        for (j = 0u; j < 110000u; ++j) (void)ext_tick(&v, &p7);
+        if (v.amp_stage != 0u || v.amplitude_q15 != 0u) {
+            fprintf(stderr, "AHDR HOLD left stuck note after decay\\n");
+            return 29;
+        }
+    }
+    /* Even 1ms and maximum 1000ms of HOLD must end in silence. */
+    {
+        static const uint32_t holds[] = {0u, 1u, 1000u};
+        uint32_t h;
+        for (h = 0u; h < 3u; ++h) {
+            ext_settings_t q = EXT_PRESETS[0].settings;
+            ext_kick_t voice = {0};
+            uint32_t j;
+            q.amp_hold_ms = holds[h];
+            ext_recalc(&q);
+            ext_trigger(&voice, &q);
+            if (q.amp_hold_frames && voice.amp_stage != 2u) return 30;
+            for (j = 0u; j < 155000u; ++j) (void)ext_tick(&voice, &q);
+            if (voice.amplitude_q15 || voice.amp_stage) {
+                fprintf(stderr, "HOLD %u ms failed one-shot termination\\n",holds[h]);
+                return 31;
+            }
+        }
+    }
+    /* RELEASE acts only on an explicit CUT / roll stop, even during HOLD. */
+    {
+        ext_settings_t q = EXT_PRESETS[6].settings;
+        ext_kick_t voice = {0};
+        uint32_t j;
+        ext_recalc(&q);
+        ext_trigger(&voice, &q);
+        for (j = 0u; j < 3500u; ++j) (void)ext_tick(&voice, &q);
+        if (voice.amp_stage != 2u) return 32;
+        ext_note_off(&voice, &q); /* explicit CUT */
+        if (voice.amp_stage != 4u) return 33;
+        for (j = 0u; j < 60000u; ++j) (void)ext_tick(&voice, &q);
+        if (voice.amplitude_q15 || voice.amp_stage) return 34;
     }
     {
         ext_settings_t linear = EXT_PRESETS[4].settings;
@@ -352,7 +390,7 @@ static int check_tuning(void)
             return 28;
         }
     }
-    puts("EXTRATONE 0.7 presets and separate PITCH/AMP ADSR: OK");
+    puts("EXTRATONE CORE 0.8 one-shot AHDR and pitch envelope: OK");
     return 0;
 }
 int main(void) { return check_tuning(); }
