@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 0.4.1: serial LP24 routing, optional sub-preserving split.
+ * EXTRATONE CORE 0.5: continuously morphing OSC A/B, deep FM and feedback.
  * No samples, no floating point, no allocation, no 64-bit division.
  */
 #ifndef EXTRATONE_KICK_H
@@ -13,7 +13,7 @@ typedef struct {
     uint32_t end_hz;      /* 20..260 Hz, final fundamental */
     uint32_t sweep_ms;    /* 3..350 ms, pitch drop */
     uint32_t decay_ms;    /* 20..1200 ms, amplitude envelope */
-    uint32_t fm_depth;    /* 0..20000, phase modulation by 2:1 oscillator */
+    uint32_t fm_depth;    /* 0..127, FM phase index: 0 to approx 4 cycles */
     uint32_t drive;       /* 0..127, up to ~22x nonlinear pre-gain */
     uint32_t roll_on;     /* PLAY starts/stops independent retriggering */
     uint32_t period_q16;  /* precomputed, no divisions in audio ISR */
@@ -35,7 +35,11 @@ typedef struct {
     uint32_t filter_span;    /* cached envelope span in LUT indices */
     uint32_t filter_res_q12; /* cached nonlinear feedback gain */
     uint32_t filter_env_coef;/* cached decay, Q16 */
-    uint32_t filter_route;   /* 0 = FULL SERIAL (all audio), 1 = SUB SAFE parallel sub */
+    uint32_t filter_route;   /* 0 = FULL SERIAL, 1 = SUB SAFE */
+    uint32_t shape_a;        /* 0..127 continuous sine->tri->saw->square->PWM */
+    uint32_t shape_b;        /* 0..127 continuous sine->tri->saw->square->PWM */
+    uint32_t osc_mix;        /* 0..127 audible oscillator B balance */
+    uint32_t fm_feedback;    /* 0..127 feedback to oscillator B phase */
 } ext_settings_t;
 
 typedef struct {
@@ -46,6 +50,7 @@ typedef struct {
     uint32_t fm_env_q15, click_env_q15, sub_phase, noise_state;
     int32_t lp24[4];          /* four one-pole states; zero latency, no audio buffers */
     uint32_t filter_env_q15, filter_coeff_q15, filter_frames;
+    int32_t fm_last;         /* last modulator sample for audio-rate feedback */
 } ext_kick_t;
 
 static int32_t ext_sine(uint32_t phase)
@@ -56,6 +61,59 @@ static int32_t ext_sine(uint32_t phase)
     int32_t ay = y < 0 ? -y : y;
     y += ((((y * ay) >> 15) - y) * 7373) >> 15;
     return y > 32767 ? 32767 : y < -32767 ? -32767 : y;
+}
+
+/* PWM table ends at about 5% duty and compensates the negative
+ * pulse level to avoid a large DC bias while sweeping pulse width.
+ * These values are calculated OFFLINE; nothing is divided per sample.
+ */
+static const uint16_t EXT_PW_Q16[32] = {
+    32768u, 31817u, 30865u, 29914u, 28963u, 28011u, 27060u, 26109u,
+    25157u, 24206u, 23255u, 22303u, 21352u, 20401u, 19449u, 18498u,
+    17547u, 16596u, 15644u, 14693u, 13742u, 12790u, 11839u, 10888u,
+    9936u, 8985u, 8034u, 7082u, 6131u, 5180u, 4228u, 3277u
+};
+static const int16_t EXT_PW_LOW[32] = {
+    -32767, -30919, -29170, -27516, -25949, -24459, -23045, -21699,
+    -20415, -19191, -18022, -16904, -15835, -14811, -13828, -12886,
+    -11981, -11112, -10274, -9469, -8694, -7945, -7224, -6528,
+    -5856, -5206, -4578, -3970, -3382, -2812, -2260, -1725
+};
+
+/* One knob covers four corners with three continuous crossfades:
+ * 0..32 sine->triangle, 32..64 triangle->saw,
+ * 64..96 saw->square; 96..127 square->pulse (50% -> ~5% duty).
+ * Raw discontinuities in saw/square/PWM are intentionally NOT yet
+ * bandlimited; extreme pitch/FM settings can alias until optimized.
+ */
+static int32_t ext_shape(uint32_t phase, uint32_t shape)
+{
+    uint32_t u = phase >> 16;
+    int32_t tri, saw, sq, a, b;
+    uint32_t morph;
+    if (u < 16384u) tri = (int32_t)u * 2;
+    else if (u < 49152u) tri = 65536 - (int32_t)u * 2;
+    else tri = (int32_t)u * 2 - 131072;
+    saw = (int32_t)u - 32768;
+    sq = u < 32768u ? 32767 : -32767;
+    if (shape < 32u) {
+        a = ext_sine(phase);
+        b = tri;
+        morph = shape;
+    } else if (shape < 64u) {
+        a = tri;
+        b = saw;
+        morph = shape - 32u;
+    } else if (shape < 96u) {
+        a = saw;
+        b = sq;
+        morph = shape - 64u;
+    } else {
+        uint32_t index = shape > 127u ? 31u : shape - 96u;
+        if (u < EXT_PW_Q16[index]) return 32767;
+        return EXT_PW_LOW[index];
+    }
+    return (a * (int32_t)(32u - morph) + b * (int32_t)morph) >> 5;
 }
 
 /* Equal-tempered tuning ratios in Q16, indexed from -24 to +24 semitones.
@@ -194,6 +252,7 @@ static void ext_trigger(ext_kick_t *s, const ext_settings_t *p)
     s->pitch_q8 = p->tuned_start_hz << 8;
     s->amplitude_q15 = 30000;
     s->fm_env_q15 = 32767u;
+    s->fm_last = 0;
     s->click_env_q15 = 32767u;
     s->filter_env_q15 = 32767u;
     s->filter_frames = 0u;
@@ -206,6 +265,7 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
 {
     uint32_t target, diff, fall, step, level;
     int32_t mod, carrier, sample, gain, sub, click_signal, main_signal;
+    uint32_t mod_phase_fb, carrier_phase_fm;
     int32_t dry_main_gain;
     uint32_t depth, noise;
     if (p->roll_on && p->period_q16) {
@@ -240,9 +300,19 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
     s->carrier_phase += step;
     /* The phase naturally wraps at 2^32; fractional ratios in 0.5 steps. */
     s->mod_phase += (step >> 1) * p->fm_ratio_x2;
-    mod = ext_sine(s->mod_phase);
+    /* Deliberate unsigned modulo-2^32 phase arithmetic for audio-rate FM.
+     * Index up to ~4 cycles and oscillator-B self-feedback up to ~1.5 cycles.
+     * Unlike v0.4, index 0 truly disables FM without muting OSC B.
+     */
+    mod_phase_fb = (uint32_t)(s->fm_last * (int32_t)p->fm_feedback) * 1536u;
+    mod = ext_shape(s->mod_phase + mod_phase_fb, p->shape_b);
+    s->fm_last = mod;
     depth = (p->fm_depth * s->fm_env_q15) >> 15;
-    carrier = ext_sine(s->carrier_phase + (uint32_t)(mod * (int32_t)depth * 2));
+    carrier_phase_fm = (uint32_t)(mod * (int32_t)depth) * 4096u;
+    carrier = ext_shape(s->carrier_phase + carrier_phase_fm, p->shape_a);
+    /* OSC B remains directly audible even with FM index at zero. */
+    carrier = (carrier * (int32_t)(127u - p->osc_mix)
+              + mod * (int32_t)p->osc_mix) / 127;
     sample = (carrier * (int32_t)s->amplitude_q15) >> 15;
 
     /* Up to ~22x pre-gain into a 30k hard clipper. */
