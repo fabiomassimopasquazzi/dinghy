@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 0.8 for M-VAVE FM-1.
+ * EXTRATONE CORE 0.9 for M-VAVE FM-1.
  * All kick sound is synthesized in real-time: no samples.
  * The original Dinghy platform remains unchanged.
  */
@@ -199,6 +199,7 @@ static void show_panel(uint32_t page)
                              : page == 1u ? "CURVE 0=EXP 127=LIN"
                              : page == 6u ? "AHDR: ALWAYS ONE SHOT"
                              : page == 4u ? "SHAPE A / SHAPE B"
+                             : page == 5u ? "MIX: INDEPENDENT GAIN"
                              : b_mode_name(p.b_mode),
                   (page == 3u && p.filter_bypass) ? C_MUT : C_ACC, 1);
     if (page == 4u) {
@@ -222,7 +223,7 @@ static void app_main(void)
     load_preset(0u);
     lcd_fill(0, 0, 240, 240, C_BLACK);
     draw_text_box(0, 13, 240, &FONT_L, "EXTRATONE", C_ACC, 1);
-    draw_text_box(0, 47, 240, &FONT_S, "EXTRATONE 0.8", C_MUT, 1);
+    draw_text_box(0, 47, 240, &FONT_S, "EXTRATONE 0.9", C_MUT, 1);
     draw_text_box(0, 222, 240, &FONT_S, "PRESETS  ARP:AHDR  REC:CUT", C_MUT, 1);
     show_panel(page);
     for (;;) {
