@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 0.9: true independent A/B/SUB gains, percussive AHDR.
+ * EXTRATONE CORE 1.0: independent mixer, musical synthesized transient engine.
  * No samples, no floating point, no allocation, no 64-bit division.
  */
 #ifndef EXTRATONE_KICK_H
@@ -24,7 +24,12 @@ typedef struct {
     uint32_t tuned_end_hz;   /* derived sub fundamental in Hz */
     uint32_t fm_ratio_x2;    /* 1..16, modulator/carrier ratio = value / 2 */
     uint32_t fm_decay_ms;    /* 5..500 ms, separate FM modulation envelope */
-    uint32_t click_amount;   /* 0..127, synthetic noise transient */
+    uint32_t click_amount;   /* 0..127 transient level; old CC31 unchanged */
+    uint32_t transient_ms;  /* 1..40 ms separate finite attack duration */
+    uint32_t transient_color;/* 0=pitched snap, 127=bright noise snap */
+    uint32_t transient_route;/* 0=PRE LP24, 1=DIRECT bypass LP24 */
+    uint32_t transient_step;/* cached phase step for pitched component */
+    uint32_t transient_fall;/* cached per-sample envelope decrement */
     uint32_t sub_body;       /* 0..127, parallel un-distorted sub oscillator */
     uint32_t fm_decay_coef;  /* precomputed envelope coefficient */
     uint32_t filter_cutoff;  /* 0..127 logarithmic frequency 30..12000 Hz */
@@ -63,6 +68,8 @@ typedef struct {
     uint32_t retrigger_clock_q16;
     uint32_t triggers;
     uint32_t fm_env_q15, click_env_q15, sub_phase, noise_state;
+    uint32_t transient_phase;
+    int32_t transient_noise_lp;
     int32_t lp24[4];          /* four one-pole states; zero latency, no audio buffers */
     uint32_t filter_env_q15, filter_coeff_q15, filter_frames;
     int32_t fm_last;         /* last modulator sample for audio-rate feedback */
@@ -297,6 +304,18 @@ static void ext_recalc(ext_settings_t *p)
     }
     p->amp_release_coef = 10268u / (p->amp_release_ms ? p->amp_release_ms : 1u);
     if (p->amp_release_coef > 32767u) p->amp_release_coef = 32767u;
+    /* True 1..40ms linear envelope, not v0.9's fixed 0.46ms
+     * exponential click. All division takes place in the UI loop.
+     */
+    if (p->transient_ms < 1u) p->transient_ms = 1u;
+    if (p->transient_ms > 40u) p->transient_ms = 40u;
+    if (p->transient_color > 127u) p->transient_color = 127u;
+    p->transient_step = (600u + p->transient_color * 18u) * 97391u;
+    {
+        uint32_t frames = (p->transient_ms * 441u + 5u) / 10u;
+        if (!frames) frames = 1u;
+        p->transient_fall = (32767u + frames - 1u) / frames;
+    }
     p->fm_decay_coef = 10268u / (p->fm_decay_ms ? p->fm_decay_ms : 1u);
     if (p->fm_decay_coef > 32767u) p->fm_decay_coef = 32767u;
     if (p->filter_cutoff > 127u) p->filter_cutoff = 127u;
@@ -328,7 +347,9 @@ static void ext_trigger(ext_kick_t *s, const ext_settings_t *p)
     s->amplitude_q15 = p->amp_attack_ms ? 0u : 30000u;
     s->fm_env_q15 = 32767u;
     s->fm_last = 0;
-    s->click_env_q15 = 32767u;
+    s->click_env_q15 = p->click_amount ? 32767u : 0u;
+    s->transient_phase = 0u;
+    s->transient_noise_lp = 0;
     s->filter_env_q15 = 32767u;
     s->filter_frames = 0u;
     s->triggers++;
@@ -470,33 +491,57 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
     main_signal = sample_body;
     sub = (sub * (int32_t)p->sub_body) >> 8;
 
-    /* The noise transient MUST follow the chosen filter routing too.
-     * This is a synthesized click, no sample playback.
+    /* EXTRATONE 1.0 independent transient generator.
+     * COLOR 0 is a pitched, phase-coherent attack.
+     * COLOR 127 is a high-passed noise attack.
+     * The continuous COLOR blend changes both tone and spectral texture.
+     * Envelope is strictly finite, 1..40ms, with fixed-point control.
      */
     click_signal = 0;
-    if (s->click_env_q15 > 4u) {
+    if (s->click_env_q15 && p->click_amount) {
+        int32_t hp, pitched, blend, x;
         noise = s->noise_state;
         noise ^= noise << 13;
         noise ^= noise >> 17;
         noise ^= noise << 5;
         s->noise_state = noise;
-        click_signal = ((((int32_t)(noise >> 16) - 32768)
-                       * (int32_t)s->click_env_q15) >> 15)
-                       * (int32_t)p->click_amount / 127;
-        s->click_env_q15 = (s->click_env_q15 * 31200u) >> 15;
-    } else s->click_env_q15 = 0;
+        x = (int32_t)(noise >> 16) - 32768;
+        /* Modest one-pole HP to remove DC/low noise energy. */
+        s->transient_noise_lp += ((x - s->transient_noise_lp) * 6500) >> 15;
+        hp = x - s->transient_noise_lp;
+        if (hp > 32767) hp = 32767;
+        if (hp < -32767) hp = -32767;
+        s->transient_phase += p->transient_step;
+        pitched = ext_sine(s->transient_phase);
+        blend = (pitched * (int32_t)(127u - p->transient_color)
+               + hp * (int32_t)p->transient_color) / 127;
+        click_signal = ((blend * (int32_t)s->click_env_q15) >> 15)
+                     * (int32_t)p->click_amount / 127;
+        /* 0..32767 -> zero in exactly the selected finite time.
+         * Once zero, no hidden tail oscillator continues ringing.
+         */
+        if (s->click_env_q15 > p->transient_fall)
+            s->click_env_q15 -= p->transient_fall;
+        else s->click_env_q15 = 0u;
+    } else {
+        s->click_env_q15 = 0u;
+    }
 
-    /* FULL SERIAL: filter the entire kick (FM body + SUB + CLICK).
-     * SUB SAFE: filter FM body + CLICK; route only the clean sine around it.
-     * LP24 bypass, controlled by GLO, still bypasses ALL filtering.
+    /* 0=PRE LP24: transient follows normal filter routing.
+     * 1=DIRECT: transient is added AFTER the LP24, for audible sharp
+     * attack even at a very low resonant filter cutoff.
+     * The SUB remains on the existing FULL SERIAL / SUB SAFE path.
      */
     if (p->filter_route == 0u) {
-        sample = main_signal + sub + click_signal;
-        sample = ext_filter_lp24(s, p, sample);
+        sample = ext_filter_lp24(s, p, main_signal + sub
+                   + (p->transient_route ? 0 : click_signal));
     } else {
-        sample = ext_filter_lp24(s, p, main_signal + click_signal);
+        sample = ext_filter_lp24(s, p, main_signal
+                   + (p->transient_route ? 0 : click_signal));
         sample += sub;
     }
+    if (p->transient_route)
+        sample += click_signal;
     sample = (sample * (int32_t)p->output_trim) / 127;
     if (sample > 30000) sample = 30000;
     if (sample < -30000) sample = -30000;
