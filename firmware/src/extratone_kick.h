@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 0.5: continuously morphing OSC A/B, deep FM and feedback.
+ * EXTRATONE CORE 0.6: LAYER/MOD/BOTH routing, shared pitch sweep and proper A/B/SUB mixer.
  * No samples, no floating point, no allocation, no 64-bit division.
  */
 #ifndef EXTRATONE_KICK_H
@@ -38,12 +38,21 @@ typedef struct {
     uint32_t filter_route;   /* 0 = FULL SERIAL, 1 = SUB SAFE */
     uint32_t shape_a;        /* 0..127 continuous sine->tri->saw->square->PWM */
     uint32_t shape_b;        /* 0..127 continuous sine->tri->saw->square->PWM */
-    uint32_t osc_mix;        /* 0..127 audible oscillator B balance */
+    uint32_t level_b;        /* 0..127 audible oscillator B level */
     uint32_t fm_feedback;    /* 0..127 feedback to oscillator B phase */
+    uint32_t level_a;        /* 0..127 direct OSC A level */
+    uint32_t output_trim;    /* 0..127 final mixer attenuation */
+    uint32_t b_mode;         /* 0=LAYER, 1=MOD, 2=BOTH */
+    int32_t b_detune_cents; /* -100..+100 cents, around shared pitch sweep */
+    uint32_t b_ratio_q8;    /* oscillator B multiplier computed in UI loop */
+    uint32_t b_step_limit;  /* carrier phase-step threshold to cap B at 14kHz */
+    uint32_t ab_normal_q15; /* normalizes A+B without forcing clipping */
+    uint32_t main_mix_q15;  /* normalized FM/body mix versus SUB */
+    uint32_t sub_mix_q15;   /* normalized sub gain */
 } ext_settings_t;
 
 typedef struct {
-    uint32_t carrier_phase, mod_phase;
+    uint32_t carrier_phase, mod_phase; /* OSC A/B phase accumulators */
     uint32_t pitch_q8, amplitude_q15;
     uint32_t retrigger_clock_q16;
     uint32_t triggers;
@@ -94,7 +103,8 @@ static int32_t ext_shape(uint32_t phase, uint32_t shape)
     if (u < 16384u) tri = (int32_t)u * 2;
     else if (u < 49152u) tri = 65536 - (int32_t)u * 2;
     else tri = (int32_t)u * 2 - 131072;
-    saw = (int32_t)u - 32768;
+    /* Align saw fundamental phase with triangle and square to avoid cancellation. */
+    saw = (int32_t)((u + 32768u) & 65535u) - 32768;
     sq = u < 32768u ? 32767 : -32767;
     if (shape < 32u) {
         a = ext_sine(phase);
@@ -141,6 +151,32 @@ static uint32_t ext_transpose_hz(uint32_t base_hz, int32_t semitones)
     if (hz > 14000u) hz = 14000u;
     if (hz < 1u) hz = 1u;
     return hz;
+}
+
+/* Detune LUT -100..+100 cents in 5-cent steps. Interpolation happens
+ * in the UI parameter update, not inside audio processing.
+ */
+static const uint32_t EXT_CENTS_RATIO_Q16[41] = {
+    61858u, 62037u, 62216u, 62396u, 62576u, 62757u,
+    62939u, 63121u, 63304u, 63487u, 63670u, 63854u,
+    64039u, 64224u, 64410u, 64596u, 64783u, 64971u,
+    65159u, 65347u, 65536u, 65726u, 65916u, 66106u,
+    66297u, 66489u, 66682u, 66874u, 67068u, 67262u,
+    67456u, 67651u, 67847u, 68043u, 68240u, 68438u,
+    68635u, 68834u, 69033u, 69233u, 69433u
+};
+static uint32_t ext_detune_ratio_q16(int32_t cents)
+{
+    uint32_t ix, remainder, a, b;
+    if (cents < -100) cents = -100;
+    if (cents > 100) cents = 100;
+    ix = (uint32_t)(cents + 100);
+    remainder = ix % 5u;
+    ix /= 5u;
+    if (ix == 40u) return EXT_CENTS_RATIO_Q16[40];
+    a = EXT_CENTS_RATIO_Q16[ix];
+    b = EXT_CENTS_RATIO_Q16[ix + 1u];
+    return a + ((b - a) * remainder + 2u) / 5u;
 }
 
 /* 128 logarithmically spaced cutoffs, 30..12000 Hz at 44.1 kHz.
@@ -243,6 +279,23 @@ static void ext_recalc(ext_settings_t *p)
     p->filter_res_q12 = p->filter_res * 132u;  /* 0..4.09x feedback */
     p->filter_env_coef = 10268u / (p->filter_env_ms ? p->filter_env_ms : 1u);
     if (p->filter_env_coef > 32767u) p->filter_env_coef = 32767u;
+    /* LAYER: both oscillators share the pitch sweep and B fine detune.
+       MOD/BOTH: B follows FM RATIO plus fine detune. */
+    {
+        uint32_t detune_ratio = ext_detune_ratio_q16(p->b_detune_cents);
+        uint32_t factor_x2 = p->b_mode == 0u ? 2u : p->fm_ratio_x2;
+        uint32_t audible_b = p->b_mode == 1u ? 0u : p->level_b;
+        uint32_t ab_sum = p->level_a + audible_b;
+        uint32_t total = ab_sum + p->sub_body;
+        if (total < 127u) total = 127u;
+        if (ab_sum < 127u) ab_sum = 127u;
+        p->b_ratio_q8 = (detune_ratio * factor_x2 + 256u) >> 9;
+        if (!p->b_ratio_q8) p->b_ratio_q8 = 1u;
+        p->b_step_limit = (14000u * 256u * 380u / p->b_ratio_q8) * 256u;
+        p->ab_normal_q15 = (127u * 32768u) / ab_sum;
+        p->main_mix_q15 = ((p->level_a + audible_b) * 32768u) / total;
+        p->sub_mix_q15 = (p->sub_body * 32768u) / total;
+    }
 }
 
 static void ext_trigger(ext_kick_t *s, const ext_settings_t *p)
@@ -265,8 +318,8 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
 {
     uint32_t target, diff, fall, step, level;
     int32_t mod, carrier, sample, gain, sub, click_signal, main_signal;
-    uint32_t mod_phase_fb, carrier_phase_fm;
-    int32_t dry_main_gain;
+    int32_t a_signal, b_signal, pre_mix, sample_body;
+    uint32_t mod_phase_fb, carrier_phase_fm, b_step;
     uint32_t depth, noise;
     if (p->roll_on && p->period_q16) {
         s->retrigger_clock_q16 += 65536u;
@@ -299,36 +352,49 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
     step = s->pitch_q8 * 380u;
     s->carrier_phase += step;
     /* The phase naturally wraps at 2^32; fractional ratios in 0.5 steps. */
-    s->mod_phase += (step >> 1) * p->fm_ratio_x2;
-    /* Deliberate unsigned modulo-2^32 phase arithmetic for audio-rate FM.
-     * Index up to ~4 cycles and oscillator-B self-feedback up to ~1.5 cycles.
-     * Unlike v0.4, index 0 truly disables FM without muting OSC B.
-     */
-    mod_phase_fb = (uint32_t)(s->fm_last * (int32_t)p->fm_feedback) * 1536u;
-    mod = ext_shape(s->mod_phase + mod_phase_fb, p->shape_b);
-    s->fm_last = mod;
-    depth = (p->fm_depth * s->fm_env_q15) >> 15;
-    carrier_phase_fm = (uint32_t)(mod * (int32_t)depth) * 4096u;
-    carrier = ext_shape(s->carrier_phase + carrier_phase_fm, p->shape_a);
-    /* OSC B remains directly audible even with FM index at zero. */
-    carrier = (carrier * (int32_t)(127u - p->osc_mix)
-              + mod * (int32_t)p->osc_mix) / 127;
-    sample = (carrier * (int32_t)s->amplitude_q15) >> 15;
+    /* Both oscillators follow the same evolving pitch envelope;
+       OSC B has its own +/-100-cent detune. Ratio only affects FM modes.
+       B increment caps at 14kHz; no division inside the ISR. */
+    b_step = step > p->b_step_limit
+           ? (14000u * 256u * 380u)
+           : (step >> 8) * p->b_ratio_q8;
+    s->mod_phase += b_step;
 
-    /* Up to ~22x pre-gain into a 30k hard clipper. */
+    if (p->b_mode != 0u) {
+        mod_phase_fb = (uint32_t)(s->fm_last * (int32_t)p->fm_feedback) * 1536u;
+        mod = ext_shape(s->mod_phase + mod_phase_fb, p->shape_b);
+        s->fm_last = mod;
+        depth = (p->fm_depth * s->fm_env_q15) >> 15;
+        carrier_phase_fm = (uint32_t)(mod * (int32_t)depth) * 4096u;
+    } else {
+        mod = ext_shape(s->mod_phase, p->shape_b);
+        s->fm_last = 0;
+        carrier_phase_fm = 0u; /* FM is genuinely excluded in LAYER */
+    }
+    carrier = ext_shape(s->carrier_phase + carrier_phase_fm, p->shape_a);
+    a_signal = (carrier * (int32_t)s->amplitude_q15) >> 15;
+    b_signal = (mod * (int32_t)s->amplitude_q15) >> 15;
+
+    /* In MOD only OSC A is audible; OSC B still modulates A.
+       In LAYER the frequency modulation is off, but both are audible.
+       In BOTH modulation and direct B audio are active. */
+    pre_mix = a_signal * (int32_t)p->level_a;
+    if (p->b_mode != 1u)
+        pre_mix += b_signal * (int32_t)p->level_b;
+    pre_mix >>= 7;
+    sample_body = (pre_mix * (int32_t)p->ab_normal_q15) >> 15;
+
+    /* Shared DRIVE after OSC mixer; clean SUB stays out of DRIVE. */
     level = p->drive > 127u ? 127u : p->drive;
     gain = (int32_t)(256u + level * level / 3u);
-    sample = (sample * gain) >> 8;
-    if (sample > 30000) sample = 30000;
-    if (sample < -30000) sample = -30000;
+    sample_body = (sample_body * gain) >> 8;
+    if (sample_body > 30000) sample_body = 30000;
+    if (sample_body < -30000) sample_body = -30000;
 
-    /* FM body has already passed DRIVE above. The clean sine sub runs
-     * independently, without restarting its phase at each trigger.
-     */
     s->sub_phase += (p->tuned_end_hz << 8) * 380u;
     sub = (ext_sine(s->sub_phase) * (int32_t)s->amplitude_q15) >> 15;
-    dry_main_gain = (int32_t)(127u - (p->sub_body * 3u / 4u));
-    main_signal = (sample * dry_main_gain) / 127;
+    main_signal = (sample_body * (int32_t)p->main_mix_q15) >> 15;
+    sub = (sub * (int32_t)p->sub_mix_q15) >> 15;
 
     /* The noise transient MUST follow the chosen filter routing too.
      * This is a synthesized click, no sample playback.
@@ -351,12 +417,13 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
      * LP24 bypass, controlled by GLO, still bypasses ALL filtering.
      */
     if (p->filter_route == 0u) {
-        sample = main_signal + (sub * (int32_t)p->sub_body) / 127 + click_signal;
+        sample = main_signal + sub + click_signal;
         sample = ext_filter_lp24(s, p, sample);
     } else {
         sample = ext_filter_lp24(s, p, main_signal + click_signal);
-        sample += (sub * (int32_t)p->sub_body) / 127;
+        sample += sub;
     }
+    sample = (sample * (int32_t)p->output_trim) / 127;
     if (sample > 30000) sample = 30000;
     if (sample < -30000) sample = -30000;
 
