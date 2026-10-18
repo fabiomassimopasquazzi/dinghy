@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include "../firmware/src/extratone_kick.h"
+#include "../firmware/src/extratone_presets.h"
 
 static int near(uint32_t a, uint32_t b) { return a + 1u >= b && b + 1u >= a; }
 static uint64_t routing_energy(ext_settings_t p, uint32_t route, uint32_t cutoff)
@@ -288,7 +289,70 @@ static int check_tuning(void)
             return 20;
         }
     }
-    puts("EXTRATONE CORE 0.6 OSC/LAYER/MOD/BOTH/MIX verified: OK");
+    /* All advertised factory presets must have usable output and stable defaults. */
+    {
+        uint32_t j;
+        for (j = 0u; j < EXT_PRESET_COUNT; ++j) {
+            ext_kick_t voice = {0};
+            ext_settings_t preset = EXT_PRESETS[j].settings;
+            uint64_t energy = 0u;
+            uint32_t frame;
+            if (preset.roll_on || preset.amp_release_ms < 5u ||
+                preset.output_trim == 0u || preset.b_mode > 2u) return 21;
+            ext_recalc(&preset);
+            ext_trigger(&voice, &preset);
+            for (frame = 0u; frame < 10000u; ++frame) {
+                int32_t v = ext_tick(&voice, &preset);
+                energy += (uint32_t)(v < 0 ? -v : v);
+                if (v < -30000 || v > 30000) return 22;
+            }
+            if (energy < 100000u) {
+                fprintf(stderr, "silent factory preset: %s\\n", EXT_PRESETS[j].name);
+                return 23;
+            }
+        }
+    }
+    /* Gated ADSR: raised attack; sustain persists with held note; note-off
+       eventually releases. SUSTAIN=0 preserves one-shot decay.
+     */
+    {
+        ext_settings_t adsr = EXT_PRESETS[6].settings;
+        ext_kick_t v = {0};
+        uint32_t j, a;
+        ext_recalc(&adsr);
+        ext_trigger(&v, &adsr);
+        if (v.amplitude_q15 != 0u || v.amp_stage != 1u) return 24;
+        for (j = 0; j < 1300u; ++j) (void)ext_tick(&v, &adsr);
+        a = v.amplitude_q15;
+        if (a < 1000u || a >= 30000u) return 25;
+        for (j = 0; j < 26000u; ++j) (void)ext_tick(&v, &adsr);
+        if (v.amp_stage != 3u || v.amplitude_q15 < 18000u) return 26;
+        ext_note_off(&v, &adsr);
+        for (j = 0; j < 26000u; ++j) (void)ext_tick(&v, &adsr);
+        if (v.amp_stage != 0u || v.amplitude_q15 != 0u) return 27;
+    }
+    {
+        ext_settings_t linear = EXT_PRESETS[4].settings;
+        ext_settings_t exp = linear;
+        ext_kick_t x = {0}, y = {0};
+        uint32_t j;
+        linear.pitch_curve = 127u;
+        exp.pitch_curve = 0u;
+        ext_recalc(&linear);
+        ext_recalc(&exp);
+        ext_trigger(&x, &linear);
+        ext_trigger(&y, &exp);
+        for (j = 0; j < 1300u; ++j) {
+            (void)ext_tick(&x, &linear);
+            (void)ext_tick(&y, &exp);
+        }
+        if (x.pitch_q8 == y.pitch_q8 ||
+            x.pitch_q8 < y.pitch_q8 + (100u << 8)) {
+            fprintf(stderr, "PITCH EXP and LINEAR not distinguishable\\n");
+            return 28;
+        }
+    }
+    puts("EXTRATONE 0.7 presets and separate PITCH/AMP ADSR: OK");
     return 0;
 }
 int main(void) { return check_tuning(); }
