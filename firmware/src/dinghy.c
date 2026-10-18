@@ -177,7 +177,7 @@ static void app_main(void)
                 p.end_hz = bounded_add(p.end_hz, d[1] * 2, 20u, 260u);
                 p.sweep_ms = bounded_add(p.sweep_ms, d[2] * 4, 3u, 350u);
                 p.decay_ms = bounded_add(p.decay_ms, d[3] * 10, 20u, 1200u);
-            } else {
+            } else if (page == 2u) {
                 p.fm_ratio_x2 = bounded_add(p.fm_ratio_x2, d[0], 1u, 16u);
                 p.fm_decay_ms = bounded_add(p.fm_decay_ms, d[1] * 5, 5u, 500u);
                 p.click_amount = bounded_add(p.click_amount, d[2] * 2, 0u, 127u);
