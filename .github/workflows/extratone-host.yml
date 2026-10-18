@@ -1,7 +1,7 @@
 name: EXTRATONE CORE host test
 on:
   push:
-    branches: [feature/extratone-kick-v01, feature/extratone-kick-v02, feature/extratone-kick-v03, feature/extratone-kick-v04-lp24, fix/extratone-v04-filter-routing, feature/extratone-kick-v05-osc-fm, feature/extratone-kick-v06-osc-routing]
+    branches: [feature/extratone-kick-v01, feature/extratone-kick-v02, feature/extratone-kick-v03, feature/extratone-kick-v04-lp24, fix/extratone-v04-filter-routing, feature/extratone-kick-v05-osc-fm, feature/extratone-kick-v06-osc-routing, feature/extratone-kick-v07-presets-envelopes]
   pull_request:
   workflow_dispatch:
 jobs:
