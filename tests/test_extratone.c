@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * Standalone native tests for the EXTRATONE kick tuning, no FM-1 needed.
+ * Standalone native tests for EXTRATONE kick tuning and LP24, no FM-1 needed.
  */
 #include <stdio.h>
 #include <stdint.h>
@@ -14,7 +14,8 @@ static int check_tuning(void)
     ext_settings_t p = {
         0u, 1000u, 40u, 35u, 175u, 7500u, 35u,
         0u, 0u, 0u, 0u, 0, 0u, 0u,
-        4u, 90u, 40u, 70u, 0u
+        4u, 90u, 40u, 70u, 0u,
+        78u, 48u, 75u, 90u, 0u, 0u, 0u, 0u
     };
     ext_kick_t k = {0};
     uint32_t i;
@@ -48,7 +49,46 @@ static int check_tuning(void)
         int32_t v = ext_tick(&k, &p);
         if (v < -30000 || v > 30000) return 5;
     }
-    puts("EXTRATONE CORE 0.3 tuning and DSP tests: OK");
+    /* LP24 low/high cutoff, followed by a high-resonance stability stress test. */
+    {
+        ext_kick_t filt = {0};
+        int32_t low_out = 0, high_out = 0;
+        uint32_t j;
+        p.filter_bypass = 0u;
+        p.filter_res = 0u;
+        p.filter_env_amt = 0u;
+        p.filter_env_ms = 90u;
+        p.filter_cutoff = 0u; /* ~30 Hz */
+        ext_recalc(&p);
+        for (j = 0u; j < 64u; ++j)
+            low_out = ext_filter_lp24(&filt, &p, 12000);
+        filt = (ext_kick_t){0};
+        p.filter_cutoff = 127u; /* ~12000 Hz */
+        ext_recalc(&p);
+        for (j = 0u; j < 64u; ++j)
+            high_out = ext_filter_lp24(&filt, &p, 12000);
+        if (high_out < 8000 || low_out > 1000) {
+            fprintf(stderr,"LP24 cutoff test failed: low=%d high=%d\n",
+                    (int)low_out, (int)high_out);
+            return 6;
+        }
+        /* Extreme feedback must remain safely bounded with nonlinear drive. */
+        filt = (ext_kick_t){0};
+        p.filter_cutoff = 99u;
+        p.filter_res = 127u;
+        ext_recalc(&p);
+        for (j = 0u; j < 80000u; ++j) {
+            int32_t x = (j % 137u) < 68u ? 32000 : -32000;
+            int32_t y = ext_filter_lp24(&filt, &p, x);
+            if (y < -30000 || y > 30000) {
+                fprintf(stderr,"LP24 unstable at frame %u: %d\n",j,(int)y);
+                return 7;
+            }
+        }
+        p.filter_bypass = 1u;
+        if (ext_filter_lp24(&filt, &p, 12345) != 12345) return 8;
+    }
+    puts("EXTRATONE CORE 0.4 tuning, FM, LP24 and resonance tests: OK");
     return 0;
 }
 int main(void) { return check_tuning(); }
