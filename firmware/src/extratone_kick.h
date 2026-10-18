@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 0.2: sample-free FM kick with full pitch envelopes.
+ * EXTRATONE CORE 0.3: sample-free FM kick with +/-24 semitone tuning.
  * No samples, no floating point, no allocation, no 64-bit division.
  */
 #ifndef EXTRATONE_KICK_H
@@ -19,6 +19,9 @@ typedef struct {
     uint32_t period_q16;  /* precomputed, no divisions in audio ISR */
     uint32_t sweep_coef;  /* precomputed exponential envelope */
     uint32_t decay_coef;  /* precomputed amplitude envelope */
+    int32_t tune_semitones; /* -24..+24: whole kick frequency transposition */
+    uint32_t tuned_start_hz; /* derived initial pitch in Hz */
+    uint32_t tuned_end_hz;   /* derived sub fundamental in Hz */
 } ext_settings_t;
 
 typedef struct {
@@ -38,6 +41,33 @@ static int32_t ext_sine(uint32_t phase)
     return y > 32767 ? 32767 : y < -32767 ? -32767 : y;
 }
 
+/* Equal-tempered tuning ratios in Q16, indexed from -24 to +24 semitones.
+ * Prepared offline: one integer multiplication per parameter change, none per audio frame.
+ */
+static const uint32_t EXT_TUNE_RATIO_Q16[49] = {
+    16384u, 17358u, 18390u, 19484u, 20643u, 21870u, 23170u, 
+    24548u, 26008u, 27554u, 29193u, 30929u, 32768u, 34716u, 
+    36781u, 38968u, 41285u, 43740u, 46341u, 49097u, 52016u, 
+    55109u, 58386u, 61858u, 65536u, 69433u, 73562u, 77936u, 
+    82570u, 87480u, 92682u, 98193u, 104032u, 110218u, 116772u, 
+    123715u, 131072u, 138866u, 147123u, 155872u, 165140u, 174960u, 
+    185364u, 196386u, 208064u, 220436u, 233544u, 247431u, 262144u
+};
+
+static uint32_t ext_transpose_hz(uint32_t base_hz, int32_t semitones)
+{
+    uint32_t ratio, hz;
+    if (semitones < -24) semitones = -24;
+    if (semitones > 24) semitones = 24;
+    ratio = EXT_TUNE_RATIO_Q16[(uint32_t)(semitones + 24)];
+    /* base_hz <= 6000, ratio <= 4.0 Q16: fits in 32-bit multiplication */
+    hz = (base_hz * ratio + 32768u) >> 16;
+    /* Avoid carrier aliasing above most of the audio band at extreme settings. */
+    if (hz > 14000u) hz = 14000u;
+    if (hz < 1u) hz = 1u;
+    return hz;
+}
+
 /* Recalculate whenever parameters change in the main/UI loop. */
 static void ext_recalc(ext_settings_t *p)
 {
@@ -45,6 +75,8 @@ static void ext_recalc(ext_settings_t *p)
     p->period_q16 = r ? (EXT_FS << 16) / r : 0u;
     p->sweep_coef = 6818u / (p->sweep_ms ? p->sweep_ms : 1u);
     if (p->sweep_coef > 2272u) p->sweep_coef = 2272u;
+    p->tuned_start_hz = ext_transpose_hz(p->start_hz, p->tune_semitones);
+    p->tuned_end_hz = ext_transpose_hz(p->end_hz, p->tune_semitones);
     p->decay_coef = 10268u / (p->decay_ms ? p->decay_ms : 1u);
     if (p->decay_coef > 32767u) p->decay_coef = 32767u;
 }
@@ -53,7 +85,7 @@ static void ext_trigger(ext_kick_t *s, const ext_settings_t *p)
 {
     s->carrier_phase = 0;
     s->mod_phase = 0;
-    s->pitch_q8 = p->start_hz << 8;
+    s->pitch_q8 = p->tuned_start_hz << 8;
     s->amplitude_q15 = 30000;
     s->triggers++;
 }
@@ -74,7 +106,7 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
     if (!s->amplitude_q15) return 0;
 
     /* Sweeps reach ~99% of target difference in sweep_ms. */
-    target = p->end_hz << 8;
+    target = p->tuned_end_hz << 8;
     if (s->pitch_q8 > target) {
         diff = s->pitch_q8 - target;
         fall = ((diff >> 8) * p->sweep_coef) >> 8;
