@@ -36,16 +36,78 @@ static uint64_t routing_energy(ext_settings_t p, uint32_t route, uint32_t cutoff
     return total;
 }
 
+/* Tests exact wave-generation on its own and then the complete output path. */
+static uint64_t shape_difference(uint32_t a, uint32_t b)
+{
+    uint64_t total = 0u;
+    uint32_t n;
+    for (n = 0u; n < 4096u; ++n) {
+        uint32_t phase = n * 1048576u; /* one phase turn every 4096 samples */
+        int32_t delta = ext_shape(phase, a) - ext_shape(phase, b);
+        total += (uint32_t)(delta < 0 ? -delta : delta);
+    }
+    return total;
+}
+static uint64_t wave_energy(ext_settings_t p, uint32_t shape_a, uint32_t mix,
+                            uint32_t index, uint32_t feedback)
+{
+    ext_kick_t k = {0};
+    uint64_t acc = 0u;
+    uint32_t i;
+    p.rate_hz = 0u; p.roll_on = 0u;
+    p.start_hz = 180u; p.end_hz = 180u;
+    p.tune_semitones = 0; p.decay_ms = 700u;
+    p.drive = 0u; p.click_amount = 0u; p.sub_body = 0u;
+    p.filter_bypass = 1u;
+    p.shape_a = shape_a; p.shape_b = 108u;
+    p.osc_mix = mix; p.fm_depth = index;
+    p.fm_feedback = feedback; p.fm_ratio_x2 = 6u;
+    ext_recalc(&p); ext_trigger(&k, &p);
+    for (i = 0u; i < 4000u; ++i) {
+        int32_t y = ext_tick(&k, &p);
+        if (y < -30000 || y > 30000) return 0u;
+        acc += (uint32_t)(y < 0 ? -y : y);
+    }
+    return acc;
+}
+static uint64_t wave_difference(ext_settings_t p, uint32_t mix_a, uint32_t mix_b,
+                                 uint32_t index_a, uint32_t index_b,
+                                 uint32_t fb_a, uint32_t fb_b)
+{
+    ext_kick_t a = {0}, b = {0};
+    uint64_t total = 0u;
+    uint32_t i;
+    p.rate_hz = 0u; p.roll_on = 0u;
+    p.start_hz = 160u; p.end_hz = 160u;
+    p.decay_ms = 900u; p.tune_semitones = 0;
+    p.drive = 0u; p.sub_body = 0u; p.click_amount = 0u;
+    p.filter_bypass = 1u;
+    p.shape_a = 0u; p.shape_b = 108u;
+    p.fm_ratio_x2 = 6u;
+    ext_recalc(&p);
+    ext_settings_t q = p;
+    p.osc_mix = mix_a; p.fm_depth = index_a; p.fm_feedback = fb_a;
+    q.osc_mix = mix_b; q.fm_depth = index_b; q.fm_feedback = fb_b;
+    ext_trigger(&a, &p);
+    ext_trigger(&b, &q);
+    for (i = 0u; i < 5000u; ++i) {
+        int32_t d = ext_tick(&a, &p) - ext_tick(&b, &q);
+        total += (uint32_t)(d < 0 ? -d : d);
+    }
+    return total;
+}
+
 static int check_tuning(void)
 {
     static const int32_t semis[] = {-24, -12, 0, 12, 24};
     static const uint32_t expected_sub[] = {10u, 20u, 40u, 80u, 160u};
     static const uint32_t expected_start[] = {250u, 500u, 1000u, 2000u, 4000u};
     ext_settings_t p = {
-        0u, 1000u, 40u, 35u, 175u, 7500u, 35u,
+        0u, 1000u, 40u, 35u, 175u, 44u, 35u,
         0u, 0u, 0u, 0u, 0, 0u, 0u,
         4u, 90u, 40u, 70u, 0u,
-        78u, 48u, 75u, 90u, 0u, 0u, 0u, 0u, 0u
+        78u, 48u, 75u, 90u, 0u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u
     };
     ext_kick_t k = {0};
     uint32_t i;
@@ -134,7 +196,33 @@ static int check_tuning(void)
             return 9;
         }
     }
-    puts("EXTRATONE CORE 0.4.1 full-serial filter routing tests: OK");
+    /* All four waveform corners and a narrow pulse MUST be different. */
+    if (shape_difference(0u, 32u) < 2000000u ||
+        shape_difference(32u, 64u) < 2000000u ||
+        shape_difference(64u, 96u) < 2000000u ||
+        shape_difference(96u, 127u) < 2000000u) {
+        fprintf(stderr, "waveform morph endpoints are not audibly distinct\\n");
+        return 10;
+    }
+    /* Avoid pulse DC offset; test PWM end with 4096 sample phase average. */
+    {
+        int64_t sum = 0;
+        uint32_t j;
+        for (j = 0; j < 4096u; ++j)
+            sum += ext_shape(j * 1048576u, 127u);
+        if (sum < -500000 || sum > 500000) {
+            fprintf(stderr, "PWM has unwanted DC offset: %lld\\n", (long long)sum);
+            return 11;
+        }
+    }
+    if (wave_difference(p, 0u, 127u, 0u, 0u, 0u, 0u) < 2000000u ||
+        wave_difference(p, 0u, 0u, 0u, 127u, 0u, 0u) < 2000000u ||
+        wave_difference(p, 0u, 0u, 95u, 95u, 0u, 115u) < 2000000u) {
+        fprintf(stderr, "OSC MIX, FM INDEX or FEEDBACK has little signal effect\\n");
+        return 12;
+    }
+    if (!wave_energy(p, 55u, 34u, 127u, 127u)) return 13;
+    puts("EXTRATONE CORE 0.5 morph/FM routing/feedback tests: OK");
     return 0;
 }
 int main(void) { return check_tuning(); }
