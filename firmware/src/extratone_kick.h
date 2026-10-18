@@ -22,6 +22,11 @@ typedef struct {
     int32_t tune_semitones; /* -24..+24: whole kick frequency transposition */
     uint32_t tuned_start_hz; /* derived initial pitch in Hz */
     uint32_t tuned_end_hz;   /* derived sub fundamental in Hz */
+    uint32_t fm_ratio_x2;    /* 1..16, modulator/carrier ratio = value / 2 */
+    uint32_t fm_decay_ms;    /* 5..500 ms, separate FM modulation envelope */
+    uint32_t click_amount;   /* 0..127, synthetic noise transient */
+    uint32_t sub_body;       /* 0..127, parallel un-distorted sub oscillator */
+    uint32_t fm_decay_coef;  /* precomputed envelope coefficient */
 } ext_settings_t;
 
 typedef struct {
@@ -29,6 +34,7 @@ typedef struct {
     uint32_t pitch_q8, amplitude_q15;
     uint32_t retrigger_clock_q16;
     uint32_t triggers;
+    uint32_t fm_env_q15, click_env_q15, sub_phase, noise_state;
 } ext_kick_t;
 
 static int32_t ext_sine(uint32_t phase)
@@ -79,6 +85,8 @@ static void ext_recalc(ext_settings_t *p)
     p->tuned_end_hz = ext_transpose_hz(p->end_hz, p->tune_semitones);
     p->decay_coef = 10268u / (p->decay_ms ? p->decay_ms : 1u);
     if (p->decay_coef > 32767u) p->decay_coef = 32767u;
+    p->fm_decay_coef = 10268u / (p->fm_decay_ms ? p->fm_decay_ms : 1u);
+    if (p->fm_decay_coef > 32767u) p->fm_decay_coef = 32767u;
 }
 
 static void ext_trigger(ext_kick_t *s, const ext_settings_t *p)
@@ -87,13 +95,18 @@ static void ext_trigger(ext_kick_t *s, const ext_settings_t *p)
     s->mod_phase = 0;
     s->pitch_q8 = p->tuned_start_hz << 8;
     s->amplitude_q15 = 30000;
+    s->fm_env_q15 = 32767u;
+    s->click_env_q15 = 32767u;
     s->triggers++;
+    s->noise_state ^= (s->triggers * 2654435761u);
+    if (!s->noise_state) s->noise_state = 1u;
 }
 
 static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
 {
     uint32_t target, diff, fall, step, level;
-    int32_t mod, carrier, sample, gain;
+    int32_t mod, carrier, sample, gain, sub;
+    uint32_t depth, noise;
     if (p->roll_on && p->period_q16) {
         s->retrigger_clock_q16 += 65536u;
         if (s->retrigger_clock_q16 >= p->period_q16) {
@@ -122,9 +135,11 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
     /* Approximation of 2^32 / (44100 * 256). */
     step = s->pitch_q8 * 380u;
     s->carrier_phase += step;
-    s->mod_phase += step * 2u;
+    /* The phase naturally wraps at 2^32; fractional ratios in 0.5 steps. */
+    s->mod_phase += (step >> 1) * p->fm_ratio_x2;
     mod = ext_sine(s->mod_phase);
-    carrier = ext_sine(s->carrier_phase + (uint32_t)(mod * (int32_t)p->fm_depth * 2));
+    depth = (p->fm_depth * s->fm_env_q15) >> 15;
+    carrier = ext_sine(s->carrier_phase + (uint32_t)(mod * (int32_t)depth * 2));
     sample = (carrier * (int32_t)s->amplitude_q15) >> 15;
 
     /* Up to ~22x pre-gain into a 30k hard clipper. */
@@ -133,6 +148,33 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
     sample = (sample * gain) >> 8;
     if (sample > 30000) sample = 30000;
     if (sample < -30000) sample = -30000;
+
+    /* A separate clean sub at tuned END Hz survives strong main-path drive.
+       Free-running phase prevents full phase restarts on every retrigger. */
+    s->sub_phase += (p->tuned_end_hz << 8) * 380u;
+    sub = (ext_sine(s->sub_phase) * (int32_t)s->amplitude_q15) >> 15;
+    sample = (sample * (int32_t)(127u - (p->sub_body * 3u / 4u))
+            + sub * (int32_t)p->sub_body) / 127;
+
+    /* Synthetic noise click (not a sample), with a short fixed decay. */
+    if (s->click_env_q15 > 4u) {
+        noise = s->noise_state;
+        noise ^= noise << 13;
+        noise ^= noise >> 17;
+        noise ^= noise << 5;
+        s->noise_state = noise;
+        sample += ((((int32_t)(noise >> 16) - 32768)
+                  * (int32_t)s->click_env_q15) >> 15)
+                  * (int32_t)p->click_amount / 127;
+        s->click_env_q15 = (s->click_env_q15 * 31200u) >> 15;
+    } else s->click_env_q15 = 0;
+
+    if (sample > 30000) sample = 30000;
+    if (sample < -30000) sample = -30000;
+
+    fall = (s->fm_env_q15 * p->fm_decay_coef) >> 16;
+    if (!fall && s->fm_env_q15) fall = 1u;
+    s->fm_env_q15 = s->fm_env_q15 > fall ? s->fm_env_q15 - fall : 0u;
 
     /* Exponential amplitude decay, ~-60 dB at decay_ms. */
     fall = (s->amplitude_q15 * p->decay_coef) >> 16;
