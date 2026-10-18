@@ -1,7 +1,7 @@
 name: EXTRATONE CORE device firmware
 on:
   push:
-    branches: [feature/extratone-kick-v01, feature/extratone-kick-v02, feature/extratone-kick-v03]
+    branches: [feature/extratone-kick-v01, feature/extratone-kick-v02, feature/extratone-kick-v03, feature/extratone-kick-v04-lp24]
   workflow_dispatch:
 
 jobs:
