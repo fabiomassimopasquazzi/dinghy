@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 0.8: separate pitch envelope and percussive AHDR (no sustain gate).
+ * EXTRATONE CORE 0.9: true independent A/B/SUB gains, percussive AHDR.
  * No samples, no floating point, no allocation, no 64-bit division.
  */
 #ifndef EXTRATONE_KICK_H
@@ -46,9 +46,7 @@ typedef struct {
     int32_t b_detune_cents; /* -100..+100 cents, around shared pitch sweep */
     uint32_t b_ratio_q8;    /* oscillator B multiplier computed in UI loop */
     uint32_t b_step_limit;  /* carrier phase-step threshold to cap B at 14kHz */
-    uint32_t ab_normal_q15; /* normalizes A+B without forcing clipping */
-    uint32_t main_mix_q15;  /* normalized FM/body mix versus SUB */
-    uint32_t sub_mix_q15;   /* normalized sub gain */
+    /* Mixer levels are independent: changing SUB never renormalizes A/B. */
     uint32_t pitch_curve;   /* 0 EXP drop .. 127 LINEAR drop */
     uint32_t pitch_linear_step_q8; /* difference divided by sweep frames */
     uint32_t amp_attack_ms;/* 0..100 ms */
@@ -313,18 +311,10 @@ static void ext_recalc(ext_settings_t *p)
     {
         uint32_t detune_ratio = ext_detune_ratio_q16(p->b_detune_cents);
         uint32_t factor_x2 = p->b_mode == 0u ? 2u : p->fm_ratio_x2;
-        uint32_t audible_b = p->b_mode == 1u ? 0u : p->level_b;
-        uint32_t ab_sum = p->level_a + audible_b;
-        uint32_t total = ab_sum + p->sub_body;
-        if (total < 127u) total = 127u;
-        if (ab_sum < 127u) ab_sum = 127u;
-        p->b_ratio_q8 = (detune_ratio * factor_x2 + 256u) >> 9;
+         p->b_ratio_q8 = (detune_ratio * factor_x2 + 256u) >> 9;
         if (!p->b_ratio_q8) p->b_ratio_q8 = 1u;
         p->b_step_limit = (14000u * 256u * 380u / p->b_ratio_q8) * 256u;
-        p->ab_normal_q15 = (127u * 32768u) / ab_sum;
-        p->main_mix_q15 = ((p->level_a + audible_b) * 32768u) / total;
-        p->sub_mix_q15 = (p->sub_body * 32768u) / total;
-    }
+     }
 }
 
 static void ext_trigger(ext_kick_t *s, const ext_settings_t *p)
@@ -456,14 +446,17 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
     a_signal = (carrier * (int32_t)s->amplitude_q15) >> 15;
     b_signal = (mod * (int32_t)s->amplitude_q15) >> 15;
 
-    /* In MOD only OSC A is audible; OSC B still modulates A.
-       In LAYER the frequency modulation is off, but both are audible.
-       In BOTH modulation and direct B audio are active. */
+    /* Independent fixed-gain mixer: each channel can contribute up to
+     * approximately half scale. Crucially, no gain depends on another
+     * channel's level, unlike the old v0.8 sum normalizer.
+     * 32-bit intermediates stay safe (2*30000*127 < 2^31).
+     * Full levels can still peak beyond headroom: OUT TRIM and the
+     * existing final limiter protect the output. No hidden pumping.
+     */
     pre_mix = a_signal * (int32_t)p->level_a;
     if (p->b_mode != 1u)
         pre_mix += b_signal * (int32_t)p->level_b;
-    pre_mix >>= 7;
-    sample_body = (pre_mix * (int32_t)p->ab_normal_q15) >> 15;
+    sample_body = pre_mix >> 8;
 
     /* Shared DRIVE after OSC mixer; clean SUB stays out of DRIVE. */
     level = p->drive > 127u ? 127u : p->drive;
@@ -474,8 +467,8 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
 
     s->sub_phase += (p->tuned_end_hz << 8) * 380u;
     sub = (ext_sine(s->sub_phase) * (int32_t)s->amplitude_q15) >> 15;
-    main_signal = (sample_body * (int32_t)p->main_mix_q15) >> 15;
-    sub = (sub * (int32_t)p->sub_mix_q15) >> 15;
+    main_signal = sample_body;
+    sub = (sub * (int32_t)p->sub_body) >> 8;
 
     /* The noise transient MUST follow the chosen filter routing too.
      * This is a synthesized click, no sample playback.
