@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE 0.7: reproducible factory demonstration presets.
+ * EXTRATONE 0.8: factory demonstration presets for fixed-duration AHDR.
  * Deliberately no samples, allocation or dynamic preset storage.
  */
 #ifndef EXTRATONE_PRESETS_H
@@ -42,7 +42,7 @@ static const ext_preset_t EXT_PRESETS[] = {
         .b_detune_cents = 0u,
         .pitch_curve = 0u,
         .amp_attack_ms = 0u,
-        .amp_sustain = 0u,
+        .amp_hold_ms = 0u,
         .amp_release_ms = 180u,
     } },
     { "DUAL LAYER", {
@@ -75,7 +75,7 @@ static const ext_preset_t EXT_PRESETS[] = {
         .b_detune_cents = 16u,
         .pitch_curve = 0u,
         .amp_attack_ms = 0u,
-        .amp_sustain = 0u,
+        .amp_hold_ms = 0u,
         .amp_release_ms = 180u,
     } },
     { "FM ATTACK", {
@@ -108,7 +108,7 @@ static const ext_preset_t EXT_PRESETS[] = {
         .b_detune_cents = 0u,
         .pitch_curve = 0u,
         .amp_attack_ms = 0u,
-        .amp_sustain = 0u,
+        .amp_hold_ms = 0u,
         .amp_release_ms = 180u,
     } },
     { "BOTH HYBRID", {
@@ -141,7 +141,7 @@ static const ext_preset_t EXT_PRESETS[] = {
         .b_detune_cents = -12,
         .pitch_curve = 0u,
         .amp_attack_ms = 0u,
-        .amp_sustain = 0u,
+        .amp_hold_ms = 0u,
         .amp_release_ms = 180u,
     } },
     { "SUB PUNCH", {
@@ -174,7 +174,7 @@ static const ext_preset_t EXT_PRESETS[] = {
         .b_detune_cents = 0u,
         .pitch_curve = 26u,
         .amp_attack_ms = 0u,
-        .amp_sustain = 0u,
+        .amp_hold_ms = 0u,
         .amp_release_ms = 180u,
     } },
     { "FILTER ACID", {
@@ -207,15 +207,15 @@ static const ext_preset_t EXT_PRESETS[] = {
         .b_detune_cents = 9u,
         .pitch_curve = 0u,
         .amp_attack_ms = 0u,
-        .amp_sustain = 0u,
+        .amp_hold_ms = 0u,
         .amp_release_ms = 180u,
     } },
-    { "ADSR HOLD", {
+    { "AHDR HOLD", {
         .rate_hz = 28u,
         .start_hz = 130u,
         .end_hz = 130u,
         .sweep_ms = 40u,
-        .decay_ms = 250u,
+        .decay_ms = 340u,
         .fm_depth = 0u,
         .drive = 0u,
         .roll_on = 0u,
@@ -239,8 +239,8 @@ static const ext_preset_t EXT_PRESETS[] = {
         .b_mode = 0u,
         .b_detune_cents = 0u,
         .pitch_curve = 0u,
-        .amp_attack_ms = 60u,
-        .amp_sustain = 95u,
+        .amp_attack_ms = 40u,
+        .amp_hold_ms = 320u,
         .amp_release_ms = 320u,
     } },
 };
