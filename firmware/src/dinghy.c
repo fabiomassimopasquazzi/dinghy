@@ -143,7 +143,12 @@ static void show_preset(void)
     const char *name = EXT_PRESETS[active_preset].name;
     uint32_t i = 0u;
     buf[i++] = 'P';
-    buf[i++] = (char)('1' + active_preset);
+    if (active_preset < 9u) {
+        buf[i++] = (char)('1' + active_preset);
+    } else {
+        buf[i++] = (char)('0' + ((active_preset + 1u) / 10u));
+        buf[i++] = (char)('0' + ((active_preset + 1u) % 10u));
+    }
     buf[i++] = ' ';
     while (*name && i < sizeof(buf) - 3u) buf[i++] = *name++;
     if (preset_edited) { buf[i++] = ' '; buf[i++] = '*'; }
