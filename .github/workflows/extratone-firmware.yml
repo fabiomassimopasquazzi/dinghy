@@ -1,0 +1,31 @@
+name: EXTRATONE CORE device firmware
+on:
+  push:
+    branches: [feature/extratone-kick-v01]
+  workflow_dispatch:
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Python requirements
+        run: python -m pip install Pillow
+      - name: Download JieLi PI32v2 compiler
+        run: sh tools/get_toolchain.sh
+      - name: Download JieLi AC79 SDK (official tagged version)
+        run: |
+          git clone --depth 1 --branch AC79NN_SDK_V1.2.1_2023-12-13 \
+            https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK.git "$HOME/fw-AC79_AIoT_SDK"
+      - name: Compile and validate FM-1 firmware
+        run: ./build.sh
+      - name: Save custom firmware for FM-1 emulator
+        uses: actions/upload-artifact@v4
+        with:
+          name: EXTRATONE-CORE-firmware-fwsc
+          path: build/dinghy.fwsc
+          if-no-files-found: error
