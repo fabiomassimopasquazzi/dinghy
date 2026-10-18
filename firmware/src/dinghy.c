@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 0.5 for M-VAVE FM-1.
+ * EXTRATONE CORE 0.6 for M-VAVE FM-1.
  * All kick sound is synthesized in real-time: no samples.
  * The original Dinghy platform remains unchanged.
  */
@@ -17,7 +17,8 @@ static ext_settings_t p = {
     0u, 0u, 0u, 0u, 0, 0u, 0u,
     4u, 90u, 45u, 70u, 0u,
     95u, 48u, 75u, 90u, 0u, 0u, 0u, 0u, 0u,
-    55u, 106u, 34u, 35u
+    55u, 106u, 75u, 35u,
+    110u, 110u, 0u, 0, 0u, 0u, 0u, 0u, 0u
 };
 static void app_audio(int32_t *out, uint32_t n) { ext_audio(&kick, &p, out, n); }
 
@@ -53,8 +54,12 @@ static int set_cc(uint32_t cc, uint32_t val)
     else if (cc == 38u) p.filter_route = val >= 64u;
     else if (cc == 39u) p.shape_a = val;
     else if (cc == 40u) p.shape_b = val;
-    else if (cc == 41u) p.osc_mix = val;
+    else if (cc == 41u) p.level_b = val;
     else if (cc == 42u) p.fm_feedback = val;
+    else if (cc == 43u) p.level_a = val;
+    else if (cc == 44u) p.output_trim = val;
+    else if (cc == 45u) p.b_mode = val < 43u ? 0u : val < 86u ? 1u : 2u;
+    else if (cc == 46u) p.b_detune_cents = (int32_t)(val * 200u / 127u) - 100;
     else return 0;
     ext_recalc(&p);
     return 1;
@@ -97,13 +102,30 @@ static const char *shape_name(uint32_t sh)
     if (sh < 96u) return "SAW-SQR";
     return "SQR-PWM";
 }
+static const char *b_mode_name(uint32_t mode)
+{
+    return mode == 0u ? "LAYER A+B"
+         : mode == 1u ? "MOD B->A"
+                      : "BOTH MOD+B";
+}
+static void show_detune(uint32_t y, int32_t cents)
+{
+    char buf[] = "B DETUNE +000 CT";
+    uint32_t abs_cents = (uint32_t)(cents < 0 ? -cents : cents);
+    buf[9] = cents < 0 ? '-' : '+';
+    buf[10] = (char)('0' + (abs_cents / 100u));
+    buf[11] = (char)('0' + ((abs_cents / 10u) % 10u));
+    buf[12] = (char)('0' + (abs_cents % 10u));
+    draw_text_box(8, y, 224, &FONT_S, buf, C_WHITE, 0);
+}
 static void show_panel(uint32_t page)
 {
-    const char *label = page == 0u ? "MAIN - PERFORMANCE"
-                      : page == 1u ? "ENV - PITCH AND DECAY"
-                      : page == 2u ? "FM - RATIO INDEX FDBK"
-                      : page == 3u ? "LP24 - RESONANT FILTER"
-                                   : "OSC - TWO WAVE MORPHS";
+    const char *label = page == 0u ? "MAIN"
+                      : page == 1u ? "PITCH + ENV"
+                      : page == 2u ? "FM ENGINE"
+                      : page == 3u ? "LP24 FILTER"
+                      : page == 4u ? "OSCILLATORS"
+                                   : "A/B/SUB MIXER";
     draw_text_box(0, 63, 240, &FONT_S, label, C_ACC, 1);
     if (page == 0u) {
         show_value(92, "RATE", p.rate_hz, "HZ");
@@ -125,14 +147,21 @@ static void show_panel(uint32_t page)
         show_value(118, "RESONANCE", p.filter_res, "");
         show_value(144, "ENV AMT", p.filter_env_amt, "");
         show_value(170, "ENV TIME", p.filter_env_ms, "MS");
-    } else {
+    } else if (page == 4u) {
         show_value(92, "SHAPE A", p.shape_a, "");
         show_value(118, "SHAPE B", p.shape_b, "");
-        show_value(144, "OSC MIX", p.osc_mix, "");
-        show_value(170, "SUB LEVEL", p.sub_body, "");
+        show_value(144, "B MODE", p.b_mode, "");
+        show_detune(170, p.b_detune_cents);
+    } else {
+        show_value(92, "LEVEL A", p.level_a, "");
+        show_value(118, "LEVEL B", p.level_b, "");
+        show_value(144, "SUB LEVEL", p.sub_body, "");
+        show_value(170, "OUT TRIM", p.output_trim, "");
     }
     draw_text_box(0, 198, 240, &FONT_S,
                   page == 3u ? (p.filter_bypass ? "LP24 BYPASS" : p.filter_route ? "LP24 SUB SAFE" : "LP24 FULL SERIAL")
+                             : page == 4u || page == 5u ? b_mode_name(p.b_mode)
+                             : page == 2u && p.b_mode == 0u ? "FM OFF: LAYER"
                              : (p.roll_on ? "ROLL ON" : "ROLL OFF"),
                   (page == 3u && p.filter_bypass) ? C_MUT : C_ACC, 1);
     if (page == 4u) {
@@ -156,8 +185,8 @@ static void app_main(void)
     ext_recalc(&p);
     lcd_fill(0, 0, 240, 240, C_BLACK);
     draw_text_box(0, 13, 240, &FONT_L, "EXTRATONE", C_ACC, 1);
-    draw_text_box(0, 47, 240, &FONT_S, "FM KICK 0.5", C_MUT, 1);
-    draw_text_box(0, 222, 240, &FONT_S, "LFO:OSC FX:LP24 EDIT:FM", C_MUT, 1);
+    draw_text_box(0, 47, 240, &FONT_S, "FM KICK 0.6", C_MUT, 1);
+    draw_text_box(0, 222, 240, &FONT_S, "LFO:OSC SEQ:MIX", C_MUT, 1);
     show_panel(page);
     for (;;) {
         uint32_t keys, down, up, b, released;
@@ -185,6 +214,7 @@ static void app_main(void)
         if (b & (1u << BTN_EDIT)) { page = page == 2u ? 0u : 2u; dirty = 1; }
         if (b & (1u << BTN_FX)) { page = page == 3u ? 0u : 3u; dirty = 1; }
         if (b & (1u << BTN_LFO)) { page = page == 4u ? 0u : 4u; dirty = 1; }
+        if (b & (1u << BTN_SEQ)) { page = page == 5u ? 0u : 5u; dirty = 1; }
         if (b & (1u << BTN_GLO)) { p.filter_bypass ^= 1u; dirty = 1; }
         if (b & (1u << BTN_SEL)) { p.filter_route ^= 1u; dirty = 1; }
         if (b & (1u << BTN_PLAY)) {
@@ -196,6 +226,7 @@ static void app_main(void)
         fm1_led_key(BTN_EDIT, page == 2u);
         fm1_led_key(BTN_FX, page == 3u);
         fm1_led_key(BTN_LFO, page == 4u);
+        fm1_led_key(BTN_SEQ, page == 5u);
         fm1_led_key(BTN_GLO, p.filter_bypass == 0u);
         fm1_led_key(BTN_SEL, p.filter_route != 0u);
         fm1_led_key(BTN_PLAY, p.roll_on != 0u);
@@ -220,8 +251,14 @@ static void app_main(void)
             } else if (page == 4u) {
                 p.shape_a = bounded_add(p.shape_a, d[0], 0u, 127u);
                 p.shape_b = bounded_add(p.shape_b, d[1], 0u, 127u);
-                p.osc_mix = bounded_add(p.osc_mix, d[2] * 2, 0u, 127u);
-                p.sub_body = bounded_add(p.sub_body, d[3] * 2, 0u, 127u);
+                p.b_mode = bounded_add(p.b_mode, d[2], 0u, 2u);
+                p.b_detune_cents = (int32_t)bounded_add((uint32_t)(p.b_detune_cents + 100),
+                                                       d[3] * 2, 0u, 200u) - 100;
+            } else if (page == 5u) {
+                p.level_a = bounded_add(p.level_a, d[0] * 2, 0u, 127u);
+                p.level_b = bounded_add(p.level_b, d[1] * 2, 0u, 127u);
+                p.sub_body = bounded_add(p.sub_body, d[2] * 2, 0u, 127u);
+                p.output_trim = bounded_add(p.output_trim, d[3] * 2, 0u, 127u);
             }
             if (page == 3u) {
                 p.filter_cutoff = bounded_add(p.filter_cutoff, d[0], 0u, 127u);
