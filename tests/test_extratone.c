@@ -207,6 +207,106 @@ static int check_sub_independence(void)
     return 0;
 }
 
+/* EXTRATONE 1.0: transient tests in the real full audio signal path.
+ * Isolate the attack by muting all OSC/SUB levels without any mixer
+ * renormalization. Check LEVEL, TIME, COLOR, and filter/direct routing.
+ */
+static int test_transient_engine(void)
+{
+    ext_settings_t base = EXT_PRESETS[0].settings, change;
+    ext_kick_t a = {0}, b = {0};
+    uint32_t i;
+    uint64_t difference = 0u, direct_energy = 0u, filtered_energy = 0u;
+    base.rate_hz = 0u;
+    base.roll_on = 0u;
+    base.level_a = 0u;
+    base.level_b = 0u;
+    base.sub_body = 0u;
+    base.drive = 0u;
+    base.output_trim = 70u;
+    base.click_amount = 112u;
+    base.transient_ms = 20u;
+    base.transient_color = 0u;
+    base.transient_route = 1u;
+    base.filter_bypass = 1u;
+    ext_recalc(&base);
+    ext_trigger(&a, &base);
+    for (i = 0u; i < 2000u; ++i) {
+        (void)ext_tick(&a, &base);
+    }
+    if (a.click_env_q15 != 0u) {
+        fprintf(stderr, "Transient did not finish in expected time\\n");
+        return 40;
+    }
+    /* Turning HIT LEVEL off must restore exact silence. */
+    change = base;
+    change.click_amount = 0u;
+    if (rendered_energy(change) != 0u) return 41;
+    /* Short HIT has stopped by 5ms; 30ms HIT must still be active. */
+    change = base; change.transient_ms = 2u;
+    ext_recalc(&change);
+    a = (ext_kick_t){0}; ext_trigger(&a, &change);
+    for (i=0u;i<240u;++i) (void)ext_tick(&a, &change);
+    if (a.click_env_q15 != 0u) return 42;
+    change.transient_ms = 30u;
+    ext_recalc(&change);
+    b = (ext_kick_t){0}; ext_trigger(&b, &change);
+    for (i=0u;i<240u;++i) (void)ext_tick(&b, &change);
+    if (b.click_env_q15 == 0u) return 43;
+
+    /* COLOR must alter the PCM signal itself at same level and duration. */
+    base.transient_color = 0u;
+    change = base; change.transient_color = 127u;
+    ext_recalc(&base); ext_recalc(&change);
+    ext_trigger(&a, &base); ext_trigger(&b, &change);
+    for (i=0u;i<1900u;++i) {
+        int32_t d = ext_tick(&a, &base) - ext_tick(&b, &change);
+        difference += (uint32_t)(d < 0 ? -d : d);
+    }
+    if (difference < 250000u) {
+        fprintf(stderr, "Transient COLOR change had no PCM impact\\n");
+        return 44;
+    }
+
+    /* PRE LP24 must be clearly attenuated with cutoff 30Hz.
+     * DIRECT must retain the attack on the exact same OSC-free signal.
+     */
+    base.transient_color = 127u;
+    base.filter_cutoff = 0u;
+    base.filter_env_amt = 0u;
+    base.filter_res = 0u;
+    base.filter_bypass = 0u;
+    base.transient_route = 1u;
+    change = base; change.transient_route = 0u;
+    ext_recalc(&base); ext_recalc(&change);
+    a = (ext_kick_t){0}; b = (ext_kick_t){0};
+    ext_trigger(&a, &base); ext_trigger(&b, &change);
+    for (i=0u;i<1900u;++i) {
+        int32_t x = ext_tick(&a,&base), y=ext_tick(&b,&change);
+        if (x < -30000 || x > 30000 || y < -30000 || y > 30000)
+            return 45;
+        direct_energy += (uint32_t)(x < 0 ? -x : x);
+        filtered_energy += (uint32_t)(y < 0 ? -y : y);
+    }
+    if (direct_energy < 100000u || direct_energy < filtered_energy*4u) {
+        fprintf(stderr, "Transient direct/pre LP24 ineffective: %llu / %llu\\n",
+            (unsigned long long)direct_energy,
+            (unsigned long long)filtered_energy);
+        return 46;
+    }
+
+    /* Silence after complete decay, even at longest transient time. */
+    base.filter_bypass = 1u;
+    base.transient_ms = 40u;
+    ext_recalc(&base);
+    a = (ext_kick_t){0};
+    ext_trigger(&a, &base);
+    for (i=0u;i<2500u;++i) (void)ext_tick(&a, &base);
+    if (a.click_env_q15 != 0u || ext_tick(&a, &base) != 0)
+        return 47;
+    return 0;
+}
+
 static int check_tuning(void)
 {
     static const int32_t semis[] = {-24, -12, 0, 12, 24};
@@ -497,7 +597,11 @@ static int check_tuning(void)
         int mix_error = check_sub_independence();
         if (mix_error) return mix_error;
     }
-    puts("EXTRATONE CORE 0.9 independent A/B/SUB mixer and AHDR: OK");
+    {
+        int err = test_transient_engine();
+        if (err) return err;
+    }
+    puts("EXTRATONE CORE 1.0 transient COLOR/TIME/ROUTE/LEVEL tests: OK");
     return 0;
 }
 int main(void) { return check_tuning(); }
