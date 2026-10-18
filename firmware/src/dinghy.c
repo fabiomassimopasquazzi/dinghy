@@ -29,7 +29,7 @@ static uint32_t bounded_add(uint32_t v, int32_t delta, uint32_t min, uint32_t ma
     return (uint32_t)n;
 }
 
-/* Seven fixed CCs: compatible with EC4, with CCs on MIDI channel 1. */
+/* MIDI CCs, channel 1, for Faderfox EC4 and Ableton. */
 static int set_cc(uint32_t cc, uint32_t val)
 {
     if (cc == 20u) p.rate_hz = val * 150u / 127u;
@@ -136,8 +136,16 @@ static void show_panel(uint32_t page)
                              : (p.roll_on ? "ROLL ON" : "ROLL OFF"),
                   (page == 3u && p.filter_bypass) ? C_MUT : C_ACC, 1);
     if (page == 4u) {
-        /* Show both morph regions; no invisible mode-dependent knob. */
-        draw_text_box(8, 198, 224, &FONT_S, shape_name(p.shape_a), C_ACC, 0);
+        char line[36];
+        const char *a = shape_name(p.shape_a);
+        const char *b = shape_name(p.shape_b);
+        uint32_t i = 0;
+        line[i++] = 'A'; line[i++] = ':';
+        while (*a && i < 15u) line[i++] = *a++;
+        line[i++] = ' '; line[i++] = 'B'; line[i++] = ':';
+        while (*b && i < sizeof(line) - 1u) line[i++] = *b++;
+        line[i] = 0;
+        draw_text_box(8, 198, 224, &FONT_S, line, C_ACC, 0);
     }
 }
 
