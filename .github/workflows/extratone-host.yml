@@ -1,7 +1,7 @@
 name: EXTRATONE CORE host test
 on:
   push:
-    branches: [feature/extratone-kick-v01, feature/extratone-kick-v02, feature/extratone-kick-v03, feature/extratone-kick-v04-lp24, fix/extratone-v04-filter-routing, feature/extratone-kick-v05-osc-fm, feature/extratone-kick-v06-osc-routing, feature/extratone-kick-v07-presets-envelopes, feature/extratone-kick-v08-ahdr-one-shot, fix/extratone-v09-independent-sub-mix, feature/extratone-v10-transient, feature/extratone-v11-keyrate-phase-ui, feature/extratone-v12-musical-low-rate]
+    branches: [feature/extratone-kick-v01, feature/extratone-kick-v02, feature/extratone-kick-v03, feature/extratone-kick-v04-lp24, fix/extratone-v04-filter-routing, feature/extratone-kick-v05-osc-fm, feature/extratone-kick-v06-osc-routing, feature/extratone-kick-v07-presets-envelopes, feature/extratone-kick-v08-ahdr-one-shot, fix/extratone-v09-independent-sub-mix, feature/extratone-v10-transient, feature/extratone-v11-keyrate-phase-ui, feature/extratone-v12-musical-low-rate, feature/extratone-v13-analog-kick]
   pull_request:
   workflow_dispatch:
 jobs:
@@ -19,6 +19,8 @@ jobs:
           /tmp/extratone-test
           cc -O2 -Wall -Wno-unused-function -o /tmp/extratone-keyrate tests/test_keyrate_phase.c
           /tmp/extratone-keyrate
+          cc -O2 -Wall -Wno-unused-function -o /tmp/extratone-analog tests/test_analog_kick.c
+          /tmp/extratone-analog
           python tests/test_ui_labels.py
       - name: Compile and run the host firmware simulation
         run: bash tests/run_host.sh
