@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 1.2 for M-VAVE FM-1.
+ * EXTRATONE CORE 1.3 for M-VAVE FM-1.
  * All kick sound is synthesized in real-time: no samples.
  * The original Dinghy platform remains unchanged.
  */
@@ -337,7 +337,7 @@ static void app_main(void)
     load_preset(0u);
     lcd_fill(0, 0, 240, 240, C_BLACK);
     draw_text_box(0, 13, 240, &FONT_L, "EXTRATONE", C_ACC, 1);
-    draw_text_box(0, 47, 240, &FONT_S, "EXTRATONE 1.2", C_MUT, 1);
+    draw_text_box(0, 47, 240, &FONT_S, "EXTRATONE 1.3", C_MUT, 1);
     draw_text_box(0, 222, 240, &FONT_S, "OCT-:KEY ALG:OCT OCT+:HIT", C_MUT, 1);
     show_panel(page);
     for (;;) {
