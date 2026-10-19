@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 1.2: decimal low-note KEY RATE, independent oscillator tuning.
+ * EXTRATONE CORE 1.3: softened DRIVE and post-DRIVE amplitude envelope.
  * No samples, no floating point, no allocation, no 64-bit division.
  */
 #ifndef EXTRATONE_KICK_H
@@ -14,7 +14,7 @@ typedef struct {
     uint32_t sweep_ms;    /* 3..350 ms, pitch drop */
     uint32_t decay_ms;    /* 20..1200 ms, amplitude envelope */
     uint32_t fm_depth;    /* 0..127, FM phase index: 0 to approx 4 cycles */
-    uint32_t drive;       /* 0..127, up to ~22x nonlinear pre-gain */
+    uint32_t drive;       /* 0..127; musical fixed-point soft saturation */
     uint32_t roll_on;     /* PLAY starts/stops independent retriggering */
     uint32_t period_q16;  /* legacy cached roll period, no ISR division */
     uint32_t roll_step;   /* phase accumulator increment, sub-Hz resolution */
@@ -248,6 +248,32 @@ static int32_t ext_filter_softclip(int32_t x)
     if (x > 16000) return 16000 + (x - 16000) / 4;
     if (x < -16000) return -16000 + (x + 16000) / 4;
     return x;
+}
+
+/* Body DRIVE for the analog-kick experiment.
+ * Identity at DRIVE=0 is handled at the call site for clean A/B gain
+ * regression and direct v1.2 comparison.
+ *
+ * For nonzero DRIVE: symmetrical soft-knee polynomial. Between 18000
+ * and 34384 the output follows y = 18000 + d - d*d/32768.
+ * At d=16384 its slope reaches zero continuously, so there is no
+ * hard kink at the limit, unlike the old abrupt +/-30000 clipping.
+ * The maximum soft limit is 26192. All products fit signed int32.
+ *
+ * This is NOT a bandlimited analog circuit model: strong nonlinearity
+ * can still alias, especially on high-frequency waveforms.
+ */
+static int32_t ext_drive_softclip(int32_t x)
+{
+    int32_t ax = x < 0 ? -x : x;
+    int32_t y;
+    if (ax <= 18000) return x;
+    if (ax >= 34384) y = 26192;
+    else {
+        int32_t d = ax - 18000;
+        y = 18000 + d - ((d * d) >> 15);
+    }
+    return x < 0 ? -y : y;
 }
 
 /* A resonant cascade of four one-pole low-passes (24 dB/oct asymptotically).
@@ -516,8 +542,11 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
         carrier_phase_fm = 0u; /* FM is genuinely excluded in LAYER */
     }
     carrier = ext_shape(s->carrier_phase + carrier_phase_fm, p->shape_a);
-    a_signal = (carrier * (int32_t)s->amplitude_q15) >> 15;
-    b_signal = (mod * (int32_t)s->amplitude_q15) >> 15;
+    /* Oscillator signals enter DRIVE before the body amplitude
+     * envelope. The filter/sub/transient route stays unchanged.
+     */
+    a_signal = carrier;
+    b_signal = mod;
 
     /* Independent fixed-gain mixer: each channel can contribute up to
      * approximately half scale. Crucially, no gain depends on another
@@ -531,16 +560,19 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
         pre_mix += b_signal * (int32_t)p->level_b;
     sample_body = pre_mix >> 8;
 
-    /* Shared DRIVE after OSC mixer; clean SUB stays out of DRIVE. */
+    /* Soft body saturation, followed by amplitude envelope.
+     * At DRIVE=0, leave the signal clean. No dynamic gain matching
+     * or additional UI parameter is introduced.
+     */
     level = p->drive > 127u ? 127u : p->drive;
-    gain = (int32_t)(256u + level * level / 3u);
-    sample_body = (sample_body * gain) >> 8;
-    if (sample_body > 30000) sample_body = 30000;
-    if (sample_body < -30000) sample_body = -30000;
+    if (level) {
+        gain = (int32_t)(256u + (level * level) / 12u);
+        sample_body = ext_drive_softclip((sample_body * gain) >> 8);
+    }
+    main_signal = (sample_body * (int32_t)s->amplitude_q15) >> 15;
 
     s->sub_phase += ext_phase_step_q8(p->tuned_end_hz << 8);
     sub = (ext_sine(s->sub_phase) * (int32_t)s->amplitude_q15) >> 15;
-    main_signal = sample_body;
     sub = (sub * (int32_t)p->sub_body) >> 8;
 
     /* EXTRATONE 1.0 independent transient generator.
