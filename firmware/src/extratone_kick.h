@@ -1,11 +1,16 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 1.3: softened DRIVE and post-DRIVE amplitude envelope.
+ * EXTRATONE CORE 1.4: smooth high-rate retriggers without changing the single kick.
  * No samples, no floating point, no allocation, no 64-bit division.
  */
 #ifndef EXTRATONE_KICK_H
 #define EXTRATONE_KICK_H
 #include <stdint.h>
 #define EXT_FS 44100u
+/* ~0.54ms smoothing of discontinuities ONLY between overlapping hits.
+ * At 1000Hz there are 44.1 samples per hit, so the ramp finishes
+ * before the next trigger; never soften the initial hit from silence.
+ */
+#define EXT_DECLICK_FRAMES 24u
 
 typedef struct {
     uint32_t rate_hz;     /* 0..1000 Hz manual roll, independent of pitch */
@@ -78,6 +83,10 @@ typedef struct {
     uint32_t filter_env_q15, filter_coeff_q15, filter_frames;
     int32_t fm_last;         /* last modulator sample for audio-rate feedback */
     uint32_t amp_stage, amp_hold_left; /* 0 idle,1 attack,2 hold,3 decay,4 release */
+    int32_t last_output;     /* last final PCM sample, for retrigger continuity */
+    int32_t declick_offset;  /* click-cancelling offset in output PCM units */
+    uint32_t declick_left;   /* remaining fade frames */
+    uint32_t declick_pending;/* newly retriggered sound awaiting first sample */
 } ext_kick_t;
 
 static int32_t ext_sine(uint32_t phase)
@@ -414,6 +423,12 @@ static void ext_recalc(ext_settings_t *p)
 
 static void ext_trigger(ext_kick_t *s, const ext_settings_t *p)
 {
+    /* Preserve the last output sample before resetting oscillator phases.
+     * Compute the appropriate correction after the new voice has produced
+     * its first sample. This avoids needing a second full oscillator voice.
+     * A first hit from silence is not smoothed or attenuated.
+     */
+    s->declick_pending = s->triggers && s->last_output != 0;
     s->carrier_phase = 0;
     s->mod_phase = 0;
     /* Reset SUB with A/B: no random phase relationship on each kick. */
@@ -495,7 +510,11 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
     ext_amp_tick(s, p);
     if (!s->amplitude_q15 && s->click_env_q15 == 0u
         && s->lp24[0] == 0 && s->lp24[1] == 0
-        && s->lp24[2] == 0 && s->lp24[3] == 0) return 0;
+        && s->lp24[2] == 0 && s->lp24[3] == 0
+        && !s->declick_pending && !s->declick_left) {
+        s->last_output = 0;
+        return 0;
+    }
 
     /* Sweeps reach ~99% of target difference in sweep_ms. */
     target = p->tuned_end_hz << 8;
@@ -629,6 +648,25 @@ static int32_t ext_tick(ext_kick_t *s, const ext_settings_t *p)
     sample = (sample * (int32_t)p->output_trim) / 127;
     if (sample > 30000) sample = 30000;
     if (sample < -30000) sample = -30000;
+    /* Apply an output-domain correction that decays over 24 frames.
+     * Crucial: the first sample after an overlapping retrigger equals
+     * the preceding output sample. The correction rapidly vanishes;
+     * sustained oscillator pitch and DRIVE are untouched.
+     * All arithmetic stays within signed int32_t on FM-1.
+     */
+    if (s->declick_pending) {
+        s->declick_offset = s->last_output - sample; /* -60000..+60000 */
+        s->declick_left = EXT_DECLICK_FRAMES;
+        s->declick_pending = 0u;
+    }
+    if (s->declick_left) {
+        sample += (s->declick_offset * (int32_t)s->declick_left)
+                / (int32_t)EXT_DECLICK_FRAMES;
+        --s->declick_left;
+    }
+    if (sample > 30000) sample = 30000;
+    if (sample < -30000) sample = -30000;
+    s->last_output = sample;
 
     fall = (s->filter_env_q15 * p->filter_env_coef) >> 16;
     if (!fall && s->filter_env_q15) fall = 1u;
