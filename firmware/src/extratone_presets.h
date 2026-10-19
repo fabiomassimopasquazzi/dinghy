@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only
- * EXTRATONE CORE 1.1: no-beat defaults, phase diagnostic presets.
+ * EXTRATONE CORE 1.3: new ANALOG KICK reference voice with dry sine and soft drive.
  * Deliberately no samples, allocation or dynamic preset storage.
  */
 #ifndef EXTRATONE_PRESETS_H
@@ -442,6 +442,42 @@ static const ext_preset_t EXT_PRESETS[] = {
         .pitch_curve = 0u,
         .amp_attack_ms = 10u,
         .amp_hold_ms = 500u,
+        .amp_release_ms = 180u,
+    } },
+    { "ANALOG KICK", {
+        .rate_hz = 28u,
+        .start_hz = 220u,
+        .end_hz = 48u,
+        .sweep_ms = 38u,
+        .decay_ms = 350u,
+        .fm_depth = 0u,
+        .drive = 50u,
+        .roll_on = 0u,
+        .tune_semitones = 0u,
+        .fm_ratio_x2 = 4u,
+        .fm_decay_ms = 90u,
+        .click_amount = 0u,
+        .transient_ms = 8u,
+        .transient_color = 104u,
+        .transient_route = 1u,
+        .sub_body = 0u,
+        .filter_cutoff = 110u,
+        .filter_res = 0u,
+        .filter_env_amt = 0u,
+        .filter_env_ms = 90u,
+        .filter_bypass = 1u,
+        .filter_route = 0u,
+        .shape_a = 0u,
+        .shape_b = 0u,
+        .level_b = 0u,
+        .fm_feedback = 0u,
+        .level_a = 115u,
+        .output_trim = 106u,
+        .b_mode = 0u,
+        .b_detune_cents = 0u,
+        .pitch_curve = 0u,
+        .amp_attack_ms = 0u,
+        .amp_hold_ms = 0u,
         .amp_release_ms = 180u,
     } },
 };
