@@ -1,7 +1,7 @@
 name: EXTRATONE CORE device firmware
 on:
   push:
-    branches: [feature/extratone-kick-v01, feature/extratone-kick-v02, feature/extratone-kick-v03, feature/extratone-kick-v04-lp24, fix/extratone-v04-filter-routing, feature/extratone-kick-v05-osc-fm, feature/extratone-kick-v06-osc-routing, feature/extratone-kick-v07-presets-envelopes, feature/extratone-kick-v08-ahdr-one-shot, fix/extratone-v09-independent-sub-mix, feature/extratone-v10-transient, feature/extratone-v11-keyrate-phase-ui, feature/extratone-v12-musical-low-rate]
+    branches: [feature/extratone-kick-v01, feature/extratone-kick-v02, feature/extratone-kick-v03, feature/extratone-kick-v04-lp24, fix/extratone-v04-filter-routing, feature/extratone-kick-v05-osc-fm, feature/extratone-kick-v06-osc-routing, feature/extratone-kick-v07-presets-envelopes, feature/extratone-kick-v08-ahdr-one-shot, fix/extratone-v09-independent-sub-mix, feature/extratone-v10-transient, feature/extratone-v11-keyrate-phase-ui, feature/extratone-v12-musical-low-rate, feature/extratone-v13-analog-kick]
   workflow_dispatch:
 
 jobs:
